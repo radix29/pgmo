@@ -81,6 +81,25 @@ certificates, `.pgpass`, service files. Post-v1 (`PLAN.md` P16.2): cloud IAM
 tokens supplied as the password via pgx's `BeforeConnect`. GSSAPI is not
 planned for v1.
 
+## Text layer (`pgsql/`)
+
+Landed (P1.2). Stdlib only (`TestImportsOnlyStdlib`); the server's rules,
+with `standard_conforming_strings` on.
+
+| API | Rule | Pinned by |
+|---|---|---|
+| `QuoteIdent` | bare only for `[a-z_][a-z0-9_]*` that is not a C/T/R keyword; else `"…"`, `"` doubled — `quote_ident` (D14) | `TestLiveQuoteIdentMatchesServer`: exact on pg18; on older servers only stricter |
+| `QualifiedName` | `schema.name`, each part `QuoteIdent`; just the name when schema is `""` | `TestQuote`, `FuzzNames` |
+| `QuoteLiteral` | `'…'`, `'` doubled; `E'…'` with `\` doubled when it holds a backslash — `quote_literal` | `TestLiveQuoteLiteralMatchesServer`, with `standard_conforming_strings` on and off |
+| `UnquoteIdent` | `"a""b"` → `a"b`; anything else unchanged, never case-folded | `TestUnquoteIdent`, `FuzzNames` |
+| `Spans`, `Span.Unescape` | scan.l: `--` (ends at CR or LF), nested `/* */`, `$N`, `'…'`/`N'…'`, `E'…'`, `U&'…'`, `B''`/`X''` (no escape), `$tag$…$tag$`, `"…"`, `U&"…"`; a prefix or `$` starts a token only as a word of its own | `TestSpans`, `FuzzSpans` (every span re-scans alone as itself), `TestLiveSpanUnescapeMatchesServer` |
+| `CommentSafe`, `BlockCommentSafe` | control characters → space; a space splits `*/` and `/*` | `TestCommentSafe`, `TestBlockCommentSafe`, `FuzzNames` |
+
+`keywords.go` is the union of every supported version's non-unreserved
+keywords (pg18's list: keywords are only ever added). Regenerate it from
+`pg_catalog.pg_get_keywords()` on a new major release; the live test fails
+on pg18 (or newer) until it is.
+
 ## Security
 
 Identifiers and literals through `pgsql`, one implementation, pinned to the

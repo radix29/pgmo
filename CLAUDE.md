@@ -9,7 +9,9 @@ counterpart of **gosmo** (`~/go/gosmo`, SQL Server's SMO in Go), over
 `github.com/jackc/pgx/v5` used natively (not through `database/sql`). Go 1.27.
 Module `github.com/radix29/pgmo`, MIT.
 
-- **Status: planning.** No Go code yet. The plan for pgmo *and* pgMS is
+- **Status: P1 in progress** (module scaffold done: `go.mod`, `doc.go`,
+  `version/`, the livedb harness `live_helpers_test.go`; the `pgsql/` text
+  layer done). The plan for pgmo *and* pgMS is
   `~/go/pgms/docs/PLAN.md` (`docs/PLAN.md` here points to it); pgmo owns
   phases P1–P6 and shares P14–P16.
 - `ARCHITECTURE.md`: API map, feature map, errors, connection internals —
