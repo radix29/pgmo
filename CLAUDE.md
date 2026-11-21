@@ -11,7 +11,15 @@ Module `github.com/radix29/pgmo`, MIT.
 
 - **Status: P1 in progress** (module scaffold done: `go.mod`, `doc.go`,
   `version/`, the livedb harness `live_helpers_test.go`; the `pgsql/` text
-  layer done). The plan for pgmo *and* pgMS is
+  layer done; the error sentinels, refusal builders and SQLSTATE predicates in
+  `errors.go`, `IsRetryable` in `retry.go`; `ServerVersion`,
+  `MinimumServerVersion` and the gate functions in `version_gate.go`; the gate
+  inventory in `version_gate_inventory_test.go`; the golden-file machinery
+  in `version_gate_golden_test.go`; P2 started: `ConnectionOptions` in
+  `connection.go`, its resolution and validation in `connection_dsn.go`;
+  `Server`, `Connect`, `NewServer` in `server.go`; the `Querier` seam in
+  `querier.go` and its fake in `pgmotest/`; per-database pools in
+`database_pools.go`). The plan for pgmo *and* pgMS is
   `~/go/pgms/docs/PLAN.md` (`docs/PLAN.md` here points to it); pgmo owns
   phases P1–P6 and shares P14–P16.
 - `ARCHITECTURE.md`: API map, feature map, errors, connection internals —
@@ -94,8 +102,10 @@ section overrides them. In short:
   first; no `Foo`/`FooContext` pairs, no iterators.
 - **Errors** wrap with `%w`, prefixed `pgmo: ` + the attempted operation,
   once. `invalidf` (`ErrInvalidRequest`), `unsupportedf` (`ErrUnsupported`),
-  `notFoundf` (`ErrNotFound`). The server's error is `*pgconn.PgError`;
-  classify by **SQLSTATE**, never by message text.
+  `notFoundf` (`ErrNotFound`) — never a bare `fmt.Errorf`/`errors.New`;
+  `invalid_request_test.go` enforces it and the one-prefix rule. The
+  server's error is `*pgconn.PgError`; classify by **SQLSTATE**, never by
+  message text.
 - **A write never goes through the retrying read path.** A write reading a
   value back (`RETURNING`) uses `execScan`.
 - **Row iteration**: `defer rows.Close()`, checked `rows.Err()`, the same
@@ -108,7 +118,12 @@ section overrides them. In short:
 - **Comment safety**: names written into `--` or `/* */` comments go through
   `pgsql.CommentSafe`/`BlockCommentSafe` (PostgreSQL block comments nest).
 - **Version gates only through `version_gate.go`** (`atLeast`/`before`/
-  `colSince` on `server_version_num`). Never gate at or below 15.
+  `colSince`/`colUntil` on `server_version_num`). Never gate at or below 15.
+  An extension's columns gate on its installed version (`extensionAtLeast`),
+  not the server's. A new gate gets an inventory entry
+  (`version_gate_inventory_test.go`) checked on the lab catalogs, and its read
+  a `goldenQueries` entry with a regenerated `testdata/version_gates/*.sql`
+  (`-updategolden`, then read the diff).
 - **Script mode** (`WithScript`, `Scripting(ctx)`), `createdObject`,
   `setIfApplied`, `bindScriptArgs`, `execSecret` — as gosmo.
 - **`CreateX(ctx, CreateXRequest) (*X, error)`; `XChanges` for partial alters;
@@ -129,8 +144,8 @@ PostgreSQL-specific (new, not in gosmo):
 - **Names are matched exactly.** PostgreSQL folds only *unquoted* input;
   stored names are case-sensitive, so there is no case-insensitive fallback
   (gosmo's `matchName` fallback does not carry over).
-- **No `USE`.** Each database is read through its own pool (`Server` keeps one
-  per database, lazily). Never read another database's catalog from the
+- **No `USE`.** Each database is read through `Server.DatabaseQuerier(name)`
+  (a pool per database, lazy, LRU-capped; never hold its pool directly). Never read another database's catalog from the
   current one — it is impossible, and `dblink` is not a substitute.
 - **Statements that cannot run in a transaction** (`CREATE DATABASE`,
   `CREATE INDEX CONCURRENTLY`, `VACUUM`, `ALTER SYSTEM`, `REINDEX …
