@@ -299,36 +299,42 @@ func (s *Server) openQuerier(ctx context.Context, name string) (Querier, error) 
 	return pool, nil
 }
 
-// databasePoolConfig is the configuration of database name's pool. Over
-// Connect's options it is those options resolved again with Database
-// replaced, so a password file entry for that database applies as libpq
-// would apply it; over a pool, the pool's configuration (hooks and all)
-// with the database replaced. MaxConns is capped at the Server's limit, and
-// MinConns and MinIdleConns are zero: a pool opened for one read should not
-// dial ahead of it.
+// databasePoolConfig is the configuration of database name's pool:
+// serverConfig's, with MaxConns capped at the Server's limit and MinConns
+// and MinIdleConns zero, since a pool opened for one read should not dial
+// ahead of it.
 func (s *Server) databasePoolConfig(name string) (*pgxpool.Config, error) {
-	var cfg *pgxpool.Config
+	cfg, err := s.serverConfig(name, fmt.Sprintf("database %q", name))
+	if err != nil {
+		return nil, err
+	}
+	cfg.MaxConns = min(cfg.MaxConns, int32(min(s.opts.maxConns, 1<<30)))
+	cfg.MinConns = 0
+	cfg.MinIdleConns = 0
+	return cfg, nil
+}
+
+// serverConfig is a fresh configuration reaching database name on this
+// server. Over Connect's options it is those options resolved again with
+// Database replaced, so a password file entry for that database applies as
+// libpq would apply it; over a pool, the pool's configuration (hooks and
+// all) with the database replaced. Over anything else it fails with
+// ErrUnsupported, prefixed "pgmo: " + op; a connection-options refusal
+// keeps its own prefix.
+func (s *Server) serverConfig(name, op string) (*pgxpool.Config, error) {
 	switch {
 	case s.connectOpts != nil:
 		o := *s.connectOpts
 		o.Database = name
 		// Valid when Connect took them; only the environment or a file
 		// changing since can fail here, and the error says which.
-		c, err := o.poolConfig()
-		if err != nil {
-			return nil, err
-		}
-		cfg = c
+		return o.poolConfig()
 	case s.Pool() != nil:
-		cfg = s.Pool().Config() // a copy
+		cfg := s.Pool().Config() // a copy
 		cfg.ConnConfig.Database = name
-	default:
-		return nil, unsupportedf("pgmo: database %q: a Server over a %T cannot open another database; give NewServer WithDatabaseOpener", name, s.q)
+		return cfg, nil
 	}
-	cfg.MaxConns = min(cfg.MaxConns, int32(min(s.opts.maxConns, 1<<30)))
-	cfg.MinConns = 0
-	cfg.MinIdleConns = 0
-	return cfg, nil
+	return nil, unsupportedf("pgmo: %s: a Server over a %T has no connection configuration to open from; build it with Connect, or NewServer over a *pgxpool.Pool (or, for DatabaseQuerier, give WithDatabaseOpener)", op, s.q)
 }
 
 // closeDatabasePools empties the map for Server.Close and closes every open

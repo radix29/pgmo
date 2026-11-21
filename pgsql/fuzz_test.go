@@ -27,6 +27,10 @@ func FuzzNames(f *testing.F) {
 			t.Fatalf("UnquoteIdent(QuoteIdent(%q)) = %q", s, got)
 		}
 		UnquoteIdent(s)
+		if got := FoldIdent(q); got != s {
+			t.Fatalf("FoldIdent(QuoteIdent(%q)) = %q", s, got)
+		}
+		FoldIdent(s)
 		if q == s {
 			only(t, q, SpanCode, s) // bare: nothing the scanner treats specially
 		} else {

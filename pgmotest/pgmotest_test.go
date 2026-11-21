@@ -562,3 +562,103 @@ func TestDatabasePoolsUnderConcurrency(t *testing.T) {
 	}
 	t.Logf("%d databases open when the readers finished (cap 2, soft)", open)
 }
+
+// A transient failure is scripted with a Responder that fails and then
+// answers: pgmo's reads retry it on a Fake as on a pool (the version read
+// here), and never on a transaction begun from it.
+func TestTransientFailureIsRetried(t *testing.T) {
+	const versionRead = "pg_catalog.current_setting('server_version_num')"
+	flaky := func() pgmotest.Responder {
+		n := 0
+		return func(pgmotest.Query) pgmotest.Result {
+			if n++; n == 1 {
+				return pgmotest.Result{Err: &pgconn.PgError{Code: "57P01"}}
+			}
+			return pgmotest.Result{Rows: [][]any{{int32(pgmotest.DefaultVersion), pgmotest.DefaultDatabase}}}
+		}
+	}
+
+	f := pgmotest.New(t)
+	f.On(versionRead, flaky())
+	if _, err := pgmo.NewServer(t.Context(), f); err != nil {
+		t.Fatalf("NewServer over a read failing once: %v", err)
+	}
+	if n := len(f.Queries()); n != 2 {
+		t.Errorf("statements sent = %d, want 2 (the read and its retry)", n)
+	}
+
+	g := pgmotest.New(t)
+	g.On(versionRead, flaky())
+	tx, err := g.Begin(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(t.Context())
+	if _, err := pgmo.NewServer(t.Context(), tx); !pgmo.IsRetryable(err) {
+		t.Errorf("NewServer over a transaction = %v, want the 57P01, not a retry", err)
+	}
+	if n := len(g.Queries()); n != 2 {
+		t.Errorf("statements sent = %d, want 2 (begin and the one read)", n)
+	}
+}
+
+// TestHoldAnswersOnRelease: a held statement is in flight until release is
+// closed, then answered by the wrapped Responder.
+func TestHoldAnswersOnRelease(t *testing.T) {
+	f := pgmotest.New(t)
+	release := make(chan struct{})
+	f.On("SELECT held", pgmotest.Hold(release, pgmotest.Rows([]any{int64(7)})))
+	got := make(chan error, 1)
+	var n int64
+	go func() { got <- f.QueryRow(context.Background(), "SELECT held").Scan(&n) }()
+	select {
+	case err := <-got:
+		t.Fatalf("answered before release: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	if err := <-got; err != nil || n != 7 {
+		t.Errorf("after release: n = %d, err = %v; want 7, nil", n, err)
+	}
+}
+
+// TestHoldIsCancelledAsOnAConnection: a held statement whose context ends
+// fails with the server's 57014, and pgmo's own reads (here the version
+// read under NewServer) add the context's error to it.
+func TestHoldIsCancelledAsOnAConnection(t *testing.T) {
+	f := pgmotest.New(t)
+	f.On("current_setting('server_version_num')", pgmotest.Hold(make(chan struct{}), pgmotest.Rows()))
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(50*time.Millisecond, cancel)
+	_, err := f.Exec(ctx, "SELECT pg_catalog.current_setting('server_version_num')")
+	if !pgmo.IsQueryCanceled(err) {
+		t.Errorf("held Exec, cancelled: err = %v, want 57014", err)
+	}
+
+	ctx, cancel = context.WithCancel(context.Background())
+	time.AfterFunc(50*time.Millisecond, cancel)
+	_, err = pgmo.NewServer(ctx, f)
+	if !pgmo.IsQueryCanceled(err) || !errors.Is(err, context.Canceled) {
+		t.Errorf("NewServer, cancelled: err = %v, want 57014 carrying context.Canceled", err)
+	}
+}
+
+// TestDoneContextSendsNothing: as pgx, a statement under a context already
+// ended is not sent — the context's error, nothing recorded.
+func TestDoneContextSendsNothing(t *testing.T) {
+	f := pgmotest.New(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := f.Exec(ctx, "UPDATE t SET a = 1"); !errors.Is(err, context.Canceled) {
+		t.Errorf("Exec: err = %v, want context.Canceled", err)
+	}
+	if _, err := f.Query(ctx, "SELECT 1"); !errors.Is(err, context.Canceled) {
+		t.Errorf("Query: err = %v, want context.Canceled", err)
+	}
+	if _, err := f.Begin(ctx); !errors.Is(err, context.Canceled) {
+		t.Errorf("Begin: err = %v, want context.Canceled", err)
+	}
+	if q := f.Queries(); len(q) != 0 {
+		t.Errorf("recorded %d statements, want none sent", len(q))
+	}
+}

@@ -72,6 +72,9 @@ var connectionKeywords = []string{
 // kept in the chain either, since its ConnString field holds the caller's
 // connection string, password and all; its (redacted) text and its cause are.
 //
+// A context ending mid-statement sends a cancel request and keeps the
+// session (UseCancelRequests), on every connection built from the result.
+//
 // The returned error is prefixed "pgmo: connection options: " and wraps
 // ErrInvalidRequest.
 func (o ConnectionOptions) poolConfig() (*pgxpool.Config, error) {
@@ -86,6 +89,7 @@ func (o ConnectionOptions) poolConfig() (*pgxpool.Config, error) {
 	if o.Password != "" {
 		cfg.ConnConfig.Password = o.Password
 	}
+	UseCancelRequests(&cfg.ConnConfig.Config)
 	if cfg.ConnConfig.RuntimeParams["application_name"] == "" {
 		cfg.ConnConfig.RuntimeParams["application_name"] = defaultApplicationName
 	}

@@ -143,12 +143,15 @@ const versionQuery = `SELECT pg_catalog.current_setting('server_version_num')::i
 
 // newServer is the one constructor behind Connect and NewServer: it reads
 // q's server version and database, refuses a version below
-// MinimumServerVersion, and gives the Server its lifetime. It leaves q open on error; the caller decides whose
-// it is to close. Its error carries no prefix.
+// MinimumServerVersion, and gives the Server its lifetime. The read is
+// retried on a transient failure (queryRowScan), so a refused or dropped
+// first connection is tried readRetryAttempts times. It leaves q open on
+// error; the caller decides whose it is to close. Its error carries no
+// prefix.
 func newServer(ctx context.Context, q Querier, opts serverOptions) (*Server, error) {
 	var num int
 	var database string
-	if err := q.QueryRow(ctx, versionQuery).Scan(&num, &database); err != nil {
+	if err := queryRowScan(ctx, q, versionQuery, nil, &num, &database); err != nil {
 		return nil, fmt.Errorf("read server version: %w", err)
 	}
 	if err := checkServerVersion(ServerVersion(num)); err != nil {
@@ -189,6 +192,23 @@ func (s *Server) Context() context.Context {
 		return context.Background()
 	}
 	return s.ctx
+}
+
+// bound is ctx, also cancelled when the Server closes, and the func that
+// stops tying it to the Server; the caller defers it. It is for work that
+// holds a connection past one statement (InTransaction): closing a pool
+// waits for its acquired connections, so without it Close would wait for
+// that work to end on its own.
+func (s *Server) bound(ctx context.Context) (_ context.Context, release func()) {
+	if s.ctx == nil {
+		return ctx, func() {}
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(s.ctx, cancel)
+	return ctx, func() {
+		stop()
+		cancel()
+	}
 }
 
 // Querier returns what the Server reads and writes through — Connect's pool,

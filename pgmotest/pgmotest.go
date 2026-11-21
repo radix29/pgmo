@@ -41,6 +41,12 @@
 // server. Every statement records the context it was issued under (Ctx) and
 // the transaction it ran in (Tx).
 //
+// A statement whose context has already ended is not sent, and fails with
+// the context's error, as with pgx. Hold keeps a rule's answer back until a
+// channel is closed or the statement's context ends — answered then with
+// the server's 57014, as on a connection pgmo opened — so a test can cancel
+// a statement in flight.
+//
 // Rows a test's code never closed, and transactions it never ended, fail the
 // test when it ends: on a pool each holds a connection.
 //
@@ -108,7 +114,10 @@ type Query struct {
 	Copy [][]any
 	// Tx numbers the transaction the statement ran in, from 1 in the order
 	// they began; 0 outside one. A savepoint is part of its transaction.
-	Tx  int
+	Tx int
+	// Ctx is the context the statement was issued under: a test asserting
+	// that a caller cancelled it, or a Responder holding it until it is
+	// (Hold), looks here.
 	Ctx context.Context
 }
 
@@ -155,6 +164,38 @@ func Fail(err error) Responder {
 // Tag answers a write with its command tag ("UPDATE 3").
 func Tag(tag string) Responder {
 	return func(Query) Result { return Result{Tag: tag} }
+}
+
+// Hold wraps r so that it answers only once release is closed, or, when the
+// statement's context ends first, fails as a statement cancelled on a pgmo
+// connection fails: the server's 57014 query_canceled (Canceled), which
+// pgmo's own methods report with the context's error joined. It is how a
+// test acts, or cancels, while a statement is genuinely in flight: without
+// it a Fake answers at once and every statement has finished before the
+// test regains control. Scope the rule (OnExec, a narrow match) so only the
+// statement under test is held.
+func Hold(release <-chan struct{}, r Responder) Responder {
+	return func(q Query) Result {
+		var done <-chan struct{}
+		if q.Ctx != nil {
+			done = q.Ctx.Done()
+		}
+		select {
+		case <-release:
+			return r(q)
+		case <-done:
+			return Result{Err: Canceled()}
+		}
+	}
+}
+
+// Canceled is the server's error for a statement a cancel request stopped:
+// SQLSTATE 57014, as pgmo.IsQueryCanceled reads it.
+func Canceled() *pgconn.PgError {
+	return &pgconn.PgError{
+		Severity: "ERROR", SeverityUnlocalized: "ERROR", Code: "57014",
+		Message: "canceling statement due to user request",
+	}
 }
 
 type rule struct {
@@ -356,7 +397,12 @@ func (f *Fake) checkLeaks() {
 }
 
 // answer records q and finds its answer; ok is false when no rule matched.
+// A statement whose context has already ended is not sent, as pgx sends
+// none: it fails with the context's error and is not recorded.
 func (f *Fake) answer(q Query) (Result, bool, error) {
+	if q.Ctx != nil && q.Ctx.Err() != nil {
+		return Result{}, false, q.Ctx.Err()
+	}
 	f.mu.Lock()
 	if f.closed {
 		f.mu.Unlock()

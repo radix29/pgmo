@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"time"
 )
 
 // ============================================================
@@ -72,4 +73,45 @@ func IsRetryable(err error) bool {
 	}
 	_, ok := errors.AsType[net.Error](err)
 	return ok
+}
+
+// ============================================================
+// Retry of idempotent reads
+// ============================================================
+
+// readRetryAttempts is the total number of tries (initial + retries) pgmo's
+// read helpers make when a read fails with a transient error.
+const readRetryAttempts = 3
+
+// readRetryDelay is the backoff before the nth retry (1-based).
+func readRetryDelay(attempt int) time.Duration {
+	return time.Duration(attempt) * 50 * time.Millisecond
+}
+
+// withRetry runs fn, retrying on IsRetryable failures up to readRetryAttempts
+// times with a short backoff between tries. It is meant only for idempotent
+// operations — a single read that can be re-run safely — and never inside a
+// transaction (see retries). A cancelled ctx stops the loop and returns ctx's
+// error joined with the transient error that caused the retry:
+// errors.Is(err, context.Canceled) holds, and the cause (the useful part when
+// a deadline ends a flapping read) is not lost.
+//
+// It covers what fn returns, nothing later, so fn must take the read to its
+// end — every row scanned and the rows' Err checked — before returning: pgx
+// reports a failure during execution (a deadlock, a terminated backend, a
+// dropped connection) through Rows.Err, not Query's error. The read helpers
+// in statement.go do.
+func withRetry[T any](ctx context.Context, fn func() (T, error)) (T, error) {
+	for attempt := 1; ; attempt++ {
+		v, err := fn()
+		if err == nil || attempt >= readRetryAttempts || !IsRetryable(err) {
+			return v, err
+		}
+		select {
+		case <-ctx.Done():
+			var zero T
+			return zero, errors.Join(ctx.Err(), err)
+		case <-time.After(readRetryDelay(attempt)):
+		}
+	}
 }

@@ -14,7 +14,7 @@ import (
 // The refusal builders (errors.go § Refusals): each reaches its own sentinel
 // and no other, keeps its message exactly, and keeps a %w cause reachable.
 func TestRefusalBuilders(t *testing.T) {
-	sentinels := []error{ErrInvalidRequest, ErrUnsupported, ErrNotFound}
+	sentinels := []error{ErrInvalidRequest, ErrUnsupported, ErrNotFound, ErrAmbiguous}
 	cases := []struct {
 		name  string
 		build func(string, ...any) error
@@ -23,6 +23,7 @@ func TestRefusalBuilders(t *testing.T) {
 		{"invalidf", invalidf, ErrInvalidRequest},
 		{"unsupportedf", unsupportedf, ErrUnsupported},
 		{"notFoundf", notFoundf, ErrNotFound},
+		{"ambiguousf", ambiguousf, ErrAmbiguous},
 	}
 	for _, tc := range cases {
 		err := tc.build("pgmo: drop table %s: %d columns", `"s"."t"`, 0)
@@ -97,7 +98,7 @@ func TestEveryArgumentRefusalWrapsErrInvalidRequest(t *testing.T) {
 				}
 			}
 			if !ok {
-				t.Errorf("%s: %s(%q) wraps nothing: use invalidf, unsupportedf or notFoundf, or add it to bareRefusalsAllowed if it is about the server's state",
+				t.Errorf("%s: %s(%q) wraps nothing: use invalidf, unsupportedf, notFoundf or ambiguousf, or add it to bareRefusalsAllowed if it is about the server's state",
 					fset.Position(b.pos), b.fn, b.format)
 			}
 		}
@@ -395,7 +396,7 @@ func buildsPrefixedError(call *ast.CallExpr) bool {
 	switch fn := call.Fun.(type) {
 	case *ast.Ident:
 		switch fn.Name {
-		case "invalidf", "unsupportedf", "notFoundf":
+		case "invalidf", "unsupportedf", "notFoundf", "ambiguousf":
 		case "refusalf":
 			format = 1
 		default:

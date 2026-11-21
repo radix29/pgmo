@@ -67,6 +67,33 @@ func TestUnquoteIdent(t *testing.T) {
 	}
 }
 
+// TestFoldIdent: a quoted identifier is unquoted, a bare one has only ASCII
+// lowered, white space around either is dropped. Pinned to the server's
+// parse_ident by TestLiveFoldIdentMatchesServer.
+func TestFoldIdent(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"Orders", "orders"},
+		{`"Orders"`, "Orders"},
+		{"orders", "orders"},
+		{"@AZ[`az{", "@az[`az{"}, // the ASCII range's edges
+		{"ÄbC", "Äbc"},           // only ASCII folds
+		{"ǅX", "ǅx"},
+		{`"a""b"`, `a"b`},
+		{`""`, ""},
+		{"  Ab\t\n", "ab"},
+		{` " A " `, " A "}, // white space inside the quotes is the name's
+		{"a.B", "a.b"},     // not split
+		{`"a"b"`, `"a"b"`}, // not one quoted identifier: folded as is
+		{`U&"X"`, `u&"x"`}, // not undone
+		{"A\xffB", "a\xffb"},
+		{"", ""},
+	} {
+		if got := FoldIdent(tc.in); got != tc.want {
+			t.Errorf("FoldIdent(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 // TestKeywordsLowercase guards the table's shape: QuoteIdent looks up only
 // names that are already lowercase ASCII, so an entry that is not would
 // never match.

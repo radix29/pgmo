@@ -29,6 +29,21 @@ type fakeServer struct {
 	databases  []string // each session's startup database, in order
 	open       int      // sessions not yet ended
 	terminated int      // sessions the client ended with Terminate
+
+	// respond, when set, answers a query before the default answer: it
+	// sends everything up to ReadyForQuery and reports true, or reports
+	// false to leave the query to the default.
+	respond func(be *pgproto3.Backend, query string) bool
+
+	// The query "sleep" runs until a cancel request names its session
+	// (each session has its own process ID and key), then fails with
+	// 57014 as a server's does; with ignoreCancel it never answers.
+	pids           uint32
+	sleeping       map[uint32]chan struct{} // the session's sleep in flight
+	cancelRequests []uint32                 // the sessions cancel requests named
+	ignoreCancel   bool
+
+	done chan struct{} // closed when the test ends
 }
 
 // startFakeServer listens on a loopback port until the test ends.
@@ -38,8 +53,8 @@ func startFakeServer(t *testing.T, version int) *fakeServer {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &fakeServer{ln: ln, version: version}
-	t.Cleanup(func() { ln.Close() })
+	f := &fakeServer{ln: ln, version: version, sleeping: map[uint32]chan struct{}{}, done: make(chan struct{})}
+	t.Cleanup(func() { close(f.done); ln.Close() })
 	go func() {
 		for {
 			c, err := ln.Accept()
@@ -90,6 +105,10 @@ func (f *fakeServer) serve(c net.Conn) {
 			}
 			continue
 		}
+		if cr, ok := msg.(*pgproto3.CancelRequest); ok {
+			f.cancel(cr)
+			return
+		}
 		if sm, ok := msg.(*pgproto3.StartupMessage); ok {
 			database = sm.Parameters["database"]
 		}
@@ -97,6 +116,8 @@ func (f *fakeServer) serve(c net.Conn) {
 	}
 	f.mu.Lock()
 	f.databases = append(f.databases, database)
+	f.pids++
+	pid := f.pids
 	f.mu.Unlock()
 	be.Send(&pgproto3.AuthenticationOk{})
 	for _, p := range [][2]string{
@@ -105,7 +126,7 @@ func (f *fakeServer) serve(c net.Conn) {
 	} {
 		be.Send(&pgproto3.ParameterStatus{Name: p[0], Value: p[1]})
 	}
-	be.Send(&pgproto3.BackendKeyData{ProcessID: 1, SecretKey: []byte{0, 0, 0, 1}})
+	be.Send(&pgproto3.BackendKeyData{ProcessID: pid, SecretKey: cancelKey(pid)})
 	be.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
 	if be.Flush() != nil {
 		return
@@ -119,7 +140,21 @@ func (f *fakeServer) serve(c net.Conn) {
 		case *pgproto3.Query:
 			f.mu.Lock()
 			f.queries = append(f.queries, m.String)
+			respond := f.respond
 			f.mu.Unlock()
+			if m.String == "sleep" {
+				if !f.sleep(be, pid) {
+					return
+				}
+				continue
+			}
+			if respond != nil && respond(be, m.String) {
+				be.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
+				if be.Flush() != nil {
+					return
+				}
+				continue
+			}
 			be.Send(&pgproto3.RowDescription{Fields: []pgproto3.FieldDescription{
 				{Name: []byte("current_setting"), DataTypeOID: 23, DataTypeSize: 4, TypeModifier: -1},
 				{Name: []byte("current_database"), DataTypeOID: 19, DataTypeSize: 64, TypeModifier: -1},
@@ -139,6 +174,50 @@ func (f *fakeServer) serve(c net.Conn) {
 			return
 		}
 	}
+}
+
+// cancelKey is session pid's secret key, which a cancel request must repeat.
+func cancelKey(pid uint32) []byte {
+	return []byte{0xca, 0x9c, byte(pid >> 8), byte(pid)}
+}
+
+// cancel ends the sleep of the session a cancel request names, if it gives
+// that session's key, as a server does; a wrong key is ignored.
+func (f *fakeServer) cancel(cr *pgproto3.CancelRequest) {
+	if string(cr.SecretKey) != string(cancelKey(cr.ProcessID)) {
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.cancelRequests = append(f.cancelRequests, cr.ProcessID)
+	if c, ok := f.sleeping[cr.ProcessID]; ok && !f.ignoreCancel {
+		close(c)
+		delete(f.sleeping, cr.ProcessID)
+	}
+}
+
+// sleep answers "sleep" on session pid: 57014 once a cancel request names
+// it. It reports false when the test ended first.
+func (f *fakeServer) sleep(be *pgproto3.Backend, pid uint32) bool {
+	c := make(chan struct{})
+	f.mu.Lock()
+	f.sleeping[pid] = c
+	f.mu.Unlock()
+	select {
+	case <-c:
+	case <-f.done:
+		return false
+	}
+	be.Send(&pgproto3.ErrorResponse{Severity: "ERROR", SeverityUnlocalized: "ERROR", Code: "57014", Message: "canceling statement due to user request"})
+	be.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
+	return be.Flush() == nil
+}
+
+// cancelled is the sessions cancel requests have named, in order.
+func (f *fakeServer) cancelled() []uint32 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]uint32(nil), f.cancelRequests...)
 }
 
 // seen is how many queries f has answered and how many sessions it holds

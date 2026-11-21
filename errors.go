@@ -113,6 +113,7 @@ var ErrInvalidRequest = errors.New("invalid request")
 //	invalidf      the caller's arguments are wrong   ErrInvalidRequest
 //	unsupportedf  pgmo has no faithful form for it    ErrUnsupported
 //	notFoundf     the named object does not exist     ErrNotFound
+//	ambiguousf    the name matched more than one      ErrAmbiguous
 //
 // The message is exactly format/args; the sentinel is reached through the
 // chain and never changes the text. A %w in format keeps that error
@@ -170,6 +171,12 @@ func unsupportedf(format string, args ...any) error {
 // (ErrNotFound).
 func notFoundf(format string, args ...any) error {
 	return refusalf(ErrNotFound, format, args...)
+}
+
+// ambiguousf builds the error of a by-name lookup that matched more than one
+// object (ErrAmbiguous).
+func ambiguousf(format string, args ...any) error {
+	return refusalf(ErrAmbiguous, format, args...)
 }
 
 // ============================================================
@@ -256,10 +263,12 @@ func IsAlreadyExists(err error) bool {
 }
 
 // IsQueryCanceled reports whether err is SQLSTATE 57014 query_canceled: the
-// statement was stopped by a cancel request (pgx sends one when the context
-// ends mid-statement), by statement_timeout, or by another session's
-// pg_cancel_backend. The connection survives; the statement did not run to
-// the end.
+// statement was stopped by a cancel request (sent when the context ends
+// mid-statement on a connection with UseCancelRequests, as every one pgmo
+// builds from ConnectionOptions has), by statement_timeout, or by another
+// session's pg_cancel_backend. The connection survives; the statement did
+// not run to the end. pgmo's own methods join the context's error to it when
+// the context caused it.
 func IsQueryCanceled(err error) bool {
 	return hasSQLState(err, "57014")
 }

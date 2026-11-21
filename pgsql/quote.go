@@ -88,6 +88,37 @@ func UnquoteIdent(name string) string {
 	return strings.ReplaceAll(inner, `""`, `"`)
 }
 
+// FoldIdent returns the stored name that one identifier, as a person types
+// it, means to the server: "Orders" (quoted) is Orders, Orders bare is
+// orders. It is the counterpart of UnquoteIdent for typed input, and what a
+// caller looking an object up by a typed name does first — pgmo matches
+// names exactly (two names differing only by case are two objects), so the
+// folding has to happen before the lookup, the server's way, not as a
+// case-insensitive match after it.
+//
+// The rule is the server's parse_ident() on one part: leading and trailing
+// white space is dropped; a whole quoted identifier is unquoted as
+// UnquoteIdent does; anything else has ASCII A–Z lowered and every other
+// byte kept — the server's downcase_identifier touches only ASCII in a
+// multibyte server encoding (UTF8), so ÄbC means Äbc. As parse_ident, it
+// does not truncate a name over 63 bytes (the lexer would). It neither
+// splits at '.' nor validates: pass each part of a qualified name
+// separately; text the server would reject comes back folded as is. The
+// U&"…" form is not undone.
+func FoldIdent(s string) string {
+	s = strings.Trim(s, " \t\n\r\v\f")
+	if u := UnquoteIdent(s); u != s {
+		return u
+	}
+	b := []byte(s)
+	for i, c := range b {
+		if c >= 'A' && c <= 'Z' {
+			b[i] = c + ('a' - 'A')
+		}
+	}
+	return string(b)
+}
+
 // QuoteLiteral renders s as a PostgreSQL string literal, safe to embed in
 // SQL text where a parameter placeholder is not accepted (DDL, a DO block,
 // a function body). Prefer a bound parameter ($1) for ordinary values. It is
