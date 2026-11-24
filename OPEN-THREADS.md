@@ -239,6 +239,18 @@ scripter writes `CREATE EXTENSION` for a member, never the member's DDL.
   `REASSIGN OWNED`/`DROP OWNED`, P4.14), `rolpassword` method, security
   labels.
 
+## Schemas: what P4.3 left
+
+- **No effective privileges.** `Privileges` is the ACL as stored (plus the
+  hard-wired default); what a role can actually do through membership is
+  `has_schema_privilege` — with effective permissions (P4.13.4/P5).
+- **Database-wide default privileges are on the Database only.** A Schema
+  carries its IN SCHEMA entries; combining them with the database-wide ones
+  (and the hard-wired default) into "what a new table here will get" is
+  left to the caller or to P5's scripter.
+- **Not read yet:** schema size (sum of its relations, P4.4/P6), objects
+  per schema, security labels.
+
 ## Flaky: `TestDatabasePoolsUnderConcurrency`
 
 `pgmotest`'s concurrency test fails about one run in three (seen 2026-11-21,

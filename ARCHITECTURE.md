@@ -1069,6 +1069,61 @@ member, two grants by different grantors (16+) or a dropped grantor (15),
 `JOIN` for the grantor's `LEFT JOIN` and a reversed grantor order are caught
 live.
 
+### Schemas and privileges (`schema.go`, `privileges.go`)
+
+Landed P4.3 (reads; the writes are P4.13.3 and P4.13.4). gosmo's `Schema`
+(ID, name, owner) plus what SQL Server keeps elsewhere:
+`Database.Schemas(ctx, ObjectFilter)`, `Database.SchemaByName(ctx, name)`
+(exact, `ErrNotFound`), `Database.SchemaRef(name)` (lookup-free, `Name`
+only), `Schema.Database()`. `pg_namespace` is per database, so the read goes
+through **`s.onDatabase(ctx, d.Name)`** — the database's own pool, or the
+transaction's when it is that database. One statement, `schemaSelect`, with
+the ACL and the default privileges as parallel arrays in two `LEFT JOIN
+LATERAL`s, zipped in Go.
+
+| Field | Source |
+|---|---|
+| `Origin` | `originColumns` over `pg_namespace`: `IsSystem` the schema's own name; `Extension` an extension's schema (`ALTER EXTENSION … ADD SCHEMA`, or created by its script — not `CREATE EXTENSION … SCHEMA s`) |
+| `OID`, `Name`, `Owner` | `oid`, `nspname`, `pg_get_userbyid(nspowner)` (`public` is `pg_database_owner`'s) |
+| `Privileges` | `aclexplode(COALESCE(nspacl, acldefault('n', nspowner)))` `WITH ORDINALITY`: one `PrivilegeGrant{Grantee, Grantor, Privilege, Grantable}` per privilege, in the server's ACL order; PUBLIC is `Grantee ""` |
+| `PrivilegesDefault` | `nspacl IS NULL`: never granted or revoked (a GRANT then REVOKE back to the same value leaves it false) |
+| `DefaultPrivileges` | `pg_default_acl` with `defaclnamespace = oid`, by role name, type code, ACL order, grouped per (role, type) |
+| `Comment` | `obj_description(oid, 'pg_namespace')` |
+
+`privileges.go` is shared by every later family: `aclLateral(acl, alias)` /
+`aclColumns` / `privilegeArrays` read any `aclitem[]` expression;
+`defaultPrivilegeLateral`/`defaultPrivilegeArrays` a schema's
+`pg_default_acl` entries. pgmo never parses `aclitem` text (its role-name
+quoting is its own); `aclexplode` gives OIDs, named through
+`pg_get_userbyid`. A family reads `COALESCE(acl, acldefault(kind, owner))`
+so `Privileges` are what the server checks, and says apart a never-set ACL.
+
+`Database.DefaultPrivileges(ctx)` reads every entry of the database, the
+database-wide ones (`Schema` empty) with them; by role, database-wide first,
+schema, type code. A database-wide entry *replaces* the type's hard-wired
+default (so `REVOKE ALL … FROM` the owner reads as an entry with no
+`Grants`); an IN SCHEMA one adds to it. Keyed on the name, it works on a
+`DatabaseRef`. `DefaultPrivilegeObjectType` is the catalog code; `String()`
+is the ON clause (`TABLES` … `LARGE OBJECTS`, 18+). All orders are the
+catalog's own types (`name`, `"char"`), so byte order whatever the
+database's collation.
+
+An `ObjectFilter`'s `Name` and `Schema` both match the schema's name,
+`System` the system-schema rule, `ExtensionMember` the schema's own
+membership.
+
+Tests: `schema_test.go` (pgmotest: every field, routed to the schema's
+database, the name bound; the filter's exact tail and `ExtensionMember`;
+not found, a server error and each short array wrapped once; `SchemaRef`;
+`DefaultPrivileges` with an emptied entry and an unknown code; `String`).
+Sixteen mutations, all caught (the `PUBLIC` mapping live only). Live,
+`TestLiveSchemas` on pg15–pg18: grants with and without GRANT OPTION and to
+PUBLIC, IN SCHEMA entries by two roles, database-wide entries including an
+emptied one, case-only names, a never-set and a reset ACL, an adopted
+extension schema, `public`, `System` and `ExtensionMember`, and the listing
+read again as a plain role, identical. The sweep reads `app` (ACL, IN
+SCHEMA entry, comment), `public` and the database's entries.
+
 ### Version sweep (`live_versionsweep_test.go`)
 
 gosmo's `TestLiveVersionSweep`, landed P3.8: call every read pgmo sends

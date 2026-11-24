@@ -211,7 +211,7 @@ func (t DefaultPrivilegeObjectType) String() string {
 //     SCHEMA), Grants replaces the type's hard-wired default: it is the
 //     whole ACL a new object starts with, the owner's own privileges
 //     included. A REVOKE … FROM PUBLIC ON FUNCTIONS shows as an entry
-//     without PUBLIC.
+//     without PUBLIC; an entry with no Grants gives new objects none.
 //   - In a schema, Grants is added to the database-wide ACL (or the
 //     hard-wired default); it can grant, never take away.
 type DefaultPrivileges struct {

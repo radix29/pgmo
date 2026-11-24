@@ -27,6 +27,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -72,6 +73,14 @@ var sweepSchema = []string{
 	`CREATE PUBLICATION sweep_pub FOR TABLE app.parent`,
 	`CREATE RULE parent_names_insert AS ON INSERT TO app.parent_names DO INSTEAD NOTHING`,
 	`COMMENT ON TABLE app.parent IS 'sweep'`,
+	// A schema ACL, a comment and default privileges — in app and
+	// database-wide — for the schema reads, granted to a predefined role so
+	// the plain role's pass stays privilege-less. Last, so the REVOKE
+	// changes no function the fixture creates.
+	`COMMENT ON SCHEMA app IS 'sweep'`,
+	`GRANT USAGE ON SCHEMA app TO pg_monitor WITH GRANT OPTION`,
+	`ALTER DEFAULT PRIVILEGES IN SCHEMA app GRANT SELECT ON TABLES TO pg_monitor`,
+	`ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC`,
 	`INSERT INTO app.parent VALUES (1, 'One', 1.00), (2, 'two', 2.00)`,
 	`INSERT INTO app.child VALUES (1, 1, 'a'), (2, 2, 'b')`,
 	`ANALYZE`,
@@ -174,6 +183,7 @@ func TestLiveVersionSweep(t *testing.T) {
 			sweepServerReads(sw, scratch)
 			sweepDatabases(sw, scratch)
 			sweepRoles(sw, scratch, plain, group)
+			sweepSchemas(sw, db)
 			sweepRoutines(sw)
 			sweepFragments(sw)
 			sw.checkCoverage()
@@ -350,6 +360,73 @@ func sweepRoles(sw *sweep, scratch, plain, group string) {
 				r.IsPredefined(), r.MemberOf)
 		}
 		return err
+	})
+}
+
+// sweepSchemas drives the schema reads with an assertion on their rows: the
+// listing narrowed to app, the by-name read of it and of public — owned by
+// pg_database_owner, its ACL set at creation — and the database's default
+// privileges, one entry database-wide and one in app.
+func sweepSchemas(sw *sweep, db *Database) {
+	check := func(s *Schema) error {
+		o := s.Owner
+		wantACL := []PrivilegeGrant{{o, o, PrivilegeUsage, false}, {o, o, PrivilegeCreate, false},
+			{"pg_monitor", o, PrivilegeUsage, true}}
+		wantDefault := []DefaultPrivileges{{Role: o, Schema: "app", ObjectType: DefaultPrivilegeTables,
+			Grants: []PrivilegeGrant{{"pg_monitor", o, PrivilegeSelect, false}}}}
+		switch {
+		case s.Name != "app" || s.OID == 0 || o == "" || s.Origin != (Origin{}) || s.Database() != db:
+			return fmt.Errorf("%+v: want the user schema app with its owner, read from %s", s, db.Name)
+		case s.PrivilegesDefault || !reflect.DeepEqual(s.Privileges, wantACL):
+			return fmt.Errorf("PrivilegesDefault %v, Privileges %+v: want %+v", s.PrivilegesDefault, s.Privileges, wantACL)
+		case !reflect.DeepEqual(s.DefaultPrivileges, wantDefault) || s.Comment != "sweep":
+			return fmt.Errorf("DefaultPrivileges %+v, Comment %q: want %+v, sweep", s.DefaultPrivileges, s.Comment, wantDefault)
+		}
+		return nil
+	}
+	sw.call("Database.Schemas(app)", func(ctx context.Context) error {
+		ss, err := db.Schemas(ctx, ObjectFilter{Name: []TextCriterion{{TextEquals, "app"}}})
+		if err != nil {
+			return err
+		}
+		if len(ss) != 1 {
+			return fmt.Errorf("%d schemas, want app alone", len(ss))
+		}
+		return check(ss[0])
+	})
+	sw.call("Database.SchemaByName(app)", func(ctx context.Context) error {
+		s, err := db.SchemaByName(ctx, "app")
+		if err != nil {
+			return err
+		}
+		return check(s)
+	})
+	sw.call("Database.SchemaByName(public)", func(ctx context.Context) error {
+		s, err := db.SchemaByName(ctx, "public")
+		if err == nil && (s.Owner != "pg_database_owner" || s.PrivilegesDefault ||
+			!slices.Contains(s.Privileges, PrivilegeGrant{"", "pg_database_owner", PrivilegeUsage, false})) {
+			err = fmt.Errorf("Owner %q, PrivilegesDefault %v, Privileges %+v: want pg_database_owner's, PUBLIC holding USAGE",
+				s.Owner, s.PrivilegesDefault, s.Privileges)
+		}
+		return err
+	})
+	sw.call("Database.DefaultPrivileges(scratch)", func(ctx context.Context) error {
+		ds, err := db.DefaultPrivileges(ctx)
+		if err != nil {
+			return err
+		}
+		if len(ds) != 2 {
+			return fmt.Errorf("%+v: want two entries", ds)
+		}
+		o := ds[0].Role
+		want := []DefaultPrivileges{
+			{Role: o, ObjectType: DefaultPrivilegeFunctions, Grants: []PrivilegeGrant{{o, o, PrivilegeExecute, false}}},
+			{Role: o, Schema: "app", ObjectType: DefaultPrivilegeTables, Grants: []PrivilegeGrant{{"pg_monitor", o, PrivilegeSelect, false}}},
+		}
+		if !reflect.DeepEqual(ds, want) {
+			return fmt.Errorf("%+v, want %+v", ds, want)
+		}
+		return nil
 	})
 }
 

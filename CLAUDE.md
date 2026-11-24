@@ -41,7 +41,8 @@ Module `github.com/radix29/pgmo`, MIT.
   and its guards in `versionsweep_reflect_test.go`; P4 started: the database
   reads `Databases`, `DatabaseByName`, `DatabaseRef`, `Database.Size` in
   `database.go`; the role reads `Roles`, `RoleByName`, `RoleRef` in
-  `role.go`).
+  `role.go`; the schema reads `Schemas`, `SchemaByName`, `SchemaRef` in
+  `schema.go`, ACLs and `Database.DefaultPrivileges` in `privileges.go`).
   The plan for pgmo *and* pgMS is
   `~/go/pgms/docs/PLAN.md` (`docs/PLAN.md` here points to it); pgmo owns
   phases P1–P6 and shares P14–P16.
