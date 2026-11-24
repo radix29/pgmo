@@ -27,7 +27,10 @@ import (
 // keys use. A family type (Database, Table, Function…) joins here when it
 // lands, and its listing is then swept reflectively.
 var sweptTypes = map[string]reflect.Type{
-	"Server": reflect.TypeFor[*Server](),
+	"Server":   reflect.TypeFor[*Server](),
+	"Database": reflect.TypeFor[*Database](),
+	"Role":     reflect.TypeFor[*Role](),
+	"Schema":   reflect.TypeFor[*Schema](),
 }
 
 // sweepSkip names the context-only methods the sweep must not call because
@@ -53,12 +56,20 @@ var sweepNotReads = map[string]string{
 // missing here, so a new read cannot go unswept; each label must be in
 // sweepMustCall, which the live sweep checks it called.
 var sweepReaders = map[string]string{
-	"newServer":                 "NewServer",
-	"Server.Info":               "Server.Info",
-	"Server.Capabilities":       "Server.Capabilities",
-	"Server.DatabasePrivileges": "Server.DatabasePrivileges",
-	"Server.passwordVerifier":   "Server.passwordVerifier",
-	"routineByName":             "routineByName",
+	"newServer":                  "NewServer",
+	"Server.Info":                "Server.Info",
+	"Server.Capabilities":        "Server.Capabilities",
+	"Server.DatabasePrivileges":  "Server.DatabasePrivileges",
+	"Server.passwordVerifier":    "Server.passwordVerifier",
+	"routineByName":              "routineByName",
+	"Server.Databases":           "Server.Databases",
+	"Server.DatabaseByName":      "Server.DatabaseByName",
+	"Database.Size":              "Database.Size",
+	"Server.Roles":               "Server.Roles",
+	"Server.RoleByName":          "Server.RoleByName",
+	"Database.Schemas":           "Database.Schemas",
+	"Database.SchemaByName":      "Database.SchemaByName",
+	"Database.DefaultPrivileges": "Database.DefaultPrivileges",
 }
 
 // sweepMustCall names every read the live sweep must reach, by hand or
@@ -79,6 +90,25 @@ var sweepMustCall = []string{
 	"Server.DatabasePrivileges",
 	"Server.passwordVerifier",
 	"routineByName",
+
+	// The database family (P4.1): the listing (reflective, and by hand with
+	// a filter), the by-name read, and the size (reflective on the scratch
+	// database, and by hand on template0, which takes no connections).
+	"Server.Databases",
+	"Server.DatabaseByName",
+	"Database.Size",
+
+	// The role family (P4.2): the listing (reflective, and by hand with a
+	// filter) and the by-name read.
+	"Server.Roles",
+	"Server.RoleByName",
+
+	// The schema family (P4.3): the listing (reflective on the scratch
+	// database, and by hand with a filter), the by-name read, and the
+	// database's default privileges (reflective, and by hand).
+	"Database.Schemas",
+	"Database.SchemaByName",
+	"Database.DefaultPrivileges",
 
 	// The query fragments the P4 families will build their listings from.
 	// No read sends them yet, so the sweep runs each in a query of its own,

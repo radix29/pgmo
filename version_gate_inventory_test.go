@@ -446,6 +446,7 @@ func TestGateCallSiteScan(t *testing.T) {
 func f(n int, ext string) {
 	_ = colSince(n, PostgreSQL17, "d.datlocale", "d.daticulocale")         // a rename: fine
 	_ = colSince(n, PostgreSQL16, "s.last_seq_scan", "NULL::timestamptz")  // fine
+	_ = colSince(n, PostgreSQL16, "m.set_option", "true")                  // fine: a boolean literal
 	_ = colUntil(n, PostgreSQL18, "op_bytes", "NULL::bigint")              // fine
 	_ = hasColumnSince(n, PostgreSQL17)                                    // fine
 	_ = atLeast(n, PostgreSQL16)                                           // fine: pg_stat_io
@@ -537,6 +538,10 @@ func stringLit(e ast.Expr) (string, bool) {
 	return exprText(e), false
 }
 
+// boolLiteral are the keywords columnRef would read as a column: true and
+// false are typed literals (boolean), as colSince's doc offers them.
+var boolLiteral = map[string]bool{"true": true, "false": true}
+
 // columnRef matches a substitute that is a column reference rather than a
 // typed literal: col, alias.col, or either quoted.
 var columnRef = regexp.MustCompile(`^(?:(?:[a-z_][a-z0-9_]*|"[^"]+")\.)?(?:[a-z_][a-z0-9_]*|"[^"]+")$`)
@@ -586,7 +591,7 @@ func (s gateCallSite) inventoryProblem() string {
 		if !hasCatalog(col, s.version, 0) {
 			return fmt.Sprintf("colSince(%s, %q): the inventory has no column %s introduced in %s", versionConst(s.version), s.col, col, s.version)
 		}
-		if columnRef.MatchString(s.zero) && !hasCatalog(bareColumn(s.zero), 0, s.version) {
+		if columnRef.MatchString(s.zero) && !boolLiteral[s.zero] && !hasCatalog(bareColumn(s.zero), 0, s.version) {
 			return fmt.Sprintf("colSince(%s, %q): its substitute %s reads as a column, but the inventory has no column %s removed in %s — cast a literal, or record the rename",
 				versionConst(s.version), s.col, s.zero, bareColumn(s.zero), s.version)
 		}

@@ -39,3 +39,15 @@ func (s *Server) AlterRolePassword(ctx context.Context, role, password string) e
 func RoutineByName(ctx context.Context, q Querier, schema, name string, args []OID) (*RoutineIdentity, error) {
 	return routineByName(ctx, q, schema, name, args)
 }
+
+// SetServer replaces the Database's back-pointer, so a test can compare the
+// catalog fields of two Databases with reflect.DeepEqual.
+func (d *Database) SetServer(s *Server) { d.server = s }
+
+// SetServer replaces the Role's back-pointer, so a test can compare the
+// catalog fields of two Roles with reflect.DeepEqual.
+func (r *Role) SetServer(s *Server) { r.server = s }
+
+// SetDatabase replaces the Schema's back-pointer, so a test can compare the
+// catalog fields of two Schemas with reflect.DeepEqual.
+func (s *Schema) SetDatabase(d *Database) { s.db = d }

@@ -105,6 +105,26 @@ that needs it, and is added to `pgmotest` in the same change:
 - **pgx.Tx extras.** `SendBatch` and `Prepare` fail the test;
   `LargeObjects` returns pgx's zero value, which panics if used.
 
+## Roles: what P4.2 left
+
+- **No password flag.** Whether a role has a password (and its hash's
+  method) is `pg_authid.rolpassword`, readable by superusers only; pg_roles
+  shows `********` for every role. A superuser-only `HasPassword` read could
+  be added for pgMS's Login properties page (P8) if it needs one.
+- **Direct grants only.** `MemberOf`/`Members` are `pg_auth_members` rows;
+  the transitive closure (what a role holds through nesting, and with which
+  INHERIT/SET path) is `pg_has_role` per pair or a recursive query — add it
+  with effective permissions (P4.13.4/P5).
+- **`ALTER ROLE ALL SET`** (`pg_db_role_setting` with both `setrole` and
+  `setdatabase` 0) is neither a role's nor a database's setting and is not
+  read; neither is `ALTER ROLE ALL IN DATABASE`, which is
+  `Database.Settings`.
+- **`RoleMembership.Inherit`/`Set` on 15 are what 15 checks**, not stored
+  options; a P4.13.2 write must not emit `WITH INHERIT`/`SET` before 16.
+- **Not read yet:** objects owned (`pg_shdepend`, needed before a drop —
+  `REASSIGN OWNED`/`DROP OWNED`, P4.14), `rolpassword` method, security
+  labels.
+
 ## Flaky: `TestDatabasePoolsUnderConcurrency` under `-race`
 
 Seen 2026-11-21 while landing P2.2.6, present before it (2 of 15 runs on
@@ -177,6 +197,48 @@ FDWs) have no `IsSystem` by this rule — the family decides (an OID below
 `FirstNormalObjectId`, 16384, is the usual sign of a built-in one). The P5
 scripter writes `CREATE EXTENSION` for a member, never the member's DDL.
 
+## Databases: what P4.1 left
+
+- **Role-in-database settings** (`pg_db_role_setting` rows with both
+  `setdatabase` and `setrole` set, `ALTER ROLE … IN DATABASE … SET`) are not
+  on `Database.Settings`; P4.2 reads them with the role
+  (`Role.DatabaseSettings`).
+- **`ParameterSetting.Value` is the stored text, not a literal.** A list
+  parameter keeps its elements' quotes (`"$user", public`); the P4.13.1
+  `SET` write must turn it back into a statement the way `pg_dump` does
+  (`GUC_LIST_QUOTE` parameters split and quoted per element).
+- **No sizes with the listing.** `Database.Size` is one round trip per
+  database; a Details pane over hundreds of databases may want one read of
+  every size it may see (`CASE WHEN has_database_privilege(oid, 'CONNECT')
+  OR pg_has_role('pg_read_all_stats', 'USAGE') THEN pg_database_size(oid)
+  END`). Add it when pgMS's Databases folder needs it (P8).
+- **Not read yet:** `pg_database_collation_actual_version(oid)` (the
+  version mismatch `ALTER DATABASE … REFRESH COLLATION VERSION` fixes),
+  `age(datfrozenxid)` (wraparound, P6/P14), `datacl` (privileges,
+  P4.13.4/P8), `dathasloginevt` (17+; event triggers, P4.9).
+- **`diagram/`** is still empty: no family through P4.1 has its class
+  diagram yet (gosmo's `diagram/*.mmd`).
+
+## Roles: what P4.2 left
+
+- **No password flag.** Whether a role has a password (and its hash's
+  method) is `pg_authid.rolpassword`, readable by superusers only; pg_roles
+  shows `********` for every role. A superuser-only `HasPassword` read could
+  be added for pgMS's Login properties page (P8) if it needs one.
+- **Direct grants only.** `MemberOf`/`Members` are `pg_auth_members` rows;
+  the transitive closure (what a role holds through nesting, and with which
+  INHERIT/SET path) is `pg_has_role` per pair or a recursive query — add it
+  with effective permissions (P4.13.4/P5).
+- **`ALTER ROLE ALL SET`** (`pg_db_role_setting` with both `setrole` and
+  `setdatabase` 0) is neither a role's nor a database's setting and is not
+  read; neither is `ALTER ROLE ALL IN DATABASE`, which is
+  `Database.Settings`.
+- **`RoleMembership.Inherit`/`Set` on 15 are what 15 checks**, not stored
+  options; a P4.13.2 write must not emit `WITH INHERIT`/`SET` before 16.
+- **Not read yet:** objects owned (`pg_shdepend`, needed before a drop —
+  `REASSIGN OWNED`/`DROP OWNED`, P4.14), `rolpassword` method, security
+  labels.
+
 ## Flaky: `TestDatabasePoolsUnderConcurrency`
 
 `pgmotest`'s concurrency test fails about one run in three (seen 2026-11-21,
@@ -186,3 +248,4 @@ its database's Fake was evicted and closed between the lease and the
 statement, or the Fake reopens late. Either the soft cap evicts an entry a
 statement is about to use (a pgmo bug, `database_pools.go` `lease`/`evict`)
 or the Fake's reopen races its close. Not investigated yet.
+Seen again 2026-11-21 during P4.1 (2 of 8 runs under `-race`).

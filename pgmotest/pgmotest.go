@@ -627,7 +627,10 @@ func newRows(res Result) (*rows, error) {
 	for i, r := range res.Rows {
 		data[i] = make([][]byte, width)
 		for c, v := range r {
-			buf, err := m.Encode(fields[c].DataTypeOID, fields[c].Format, v, nil)
+			// An empty, non-nil buf: Encode returns nil only for NULL, and an
+			// empty value (a "" text) appends nothing, so a nil buf would
+			// come back nil and be read as NULL.
+			buf, err := m.Encode(fields[c].DataTypeOID, fields[c].Format, v, []byte{})
 			if err != nil {
 				return nil, fmt.Errorf("row %d column %d: %w", i, c, err)
 			}

@@ -73,6 +73,12 @@ func TestRefusalBuilders(t *testing.T) {
 // shrinks with the code.
 var bareRefusalsAllowed = map[string][]string{
 	"errors.go": {""}, // refusalf itself: its format is a parameter
+	// A role row whose parallel arrays do not line up: the server's answer
+	// is malformed, nothing the caller asked for.
+	"role.go": {"membership arrays of different lengths", "database settings arrays of different lengths"},
+	// An ACL's or default-privilege read's parallel arrays that do not line
+	// up: likewise the server's answer, malformed.
+	"privileges.go": {"privilege arrays of different lengths"},
 }
 
 // A call refused for its own arguments wraps ErrInvalidRequest, so a caller

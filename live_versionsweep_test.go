@@ -93,6 +93,16 @@ func TestLiveVersionSweep(t *testing.T) {
 			t.Errorf("drop database: %v", err)
 		}
 	})
+	// A database-wide setting and a comment, so the database reads have one
+	// of each to return.
+	for _, stmt := range []string{
+		"ALTER DATABASE " + pgsql.QuoteIdent(scratch) + " SET work_mem = '8MB'",
+		"COMMENT ON DATABASE " + pgsql.QuoteIdent(scratch) + " IS 'sweep'",
+	} {
+		if _, err := admin.Exec(ctx, stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if _, err := admin.Exec(ctx, "CREATE ROLE "+pgsql.QuoteIdent(plain)+" NOLOGIN"); err != nil {
 		t.Fatal(err)
 	}
@@ -101,6 +111,29 @@ func TestLiveVersionSweep(t *testing.T) {
 			t.Errorf("drop role: %v", err)
 		}
 	})
+	// A group plain is a member of, a setting of plain's in every database
+	// and one in the scratch database, and a comment, so the role reads have
+	// one of each to return. The group holds no privileges: plain stays the
+	// unprivileged role its pass needs.
+	group := fmt.Sprintf("pgmo_live_sweep_group_%d", stamp)
+	if _, err := admin.Exec(ctx, "CREATE ROLE "+pgsql.QuoteIdent(group)+" NOLOGIN"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if _, err := admin.Exec(ctx, "DROP ROLE IF EXISTS "+pgsql.QuoteIdent(group)); err != nil {
+			t.Errorf("drop role: %v", err)
+		}
+	})
+	for _, stmt := range []string{
+		"GRANT " + pgsql.QuoteIdent(group) + " TO " + pgsql.QuoteIdent(plain),
+		"ALTER ROLE " + pgsql.QuoteIdent(plain) + " SET work_mem = '8MB'",
+		"ALTER ROLE " + pgsql.QuoteIdent(plain) + " IN DATABASE " + pgsql.QuoteIdent(scratch) + " SET work_mem = '4MB'",
+		"COMMENT ON ROLE " + pgsql.QuoteIdent(plain) + " IS 'sweep'",
+	} {
+		if _, err := admin.Exec(ctx, stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	srv, err := Connect(ctx, ConnectionOptions{
 		ConnString: *liveConnString, Database: scratch, ApplicationName: "pgmo - live version sweep",
@@ -119,6 +152,15 @@ func TestLiveVersionSweep(t *testing.T) {
 		}
 	}
 
+	db, err := srv.DatabaseByName(ctx, scratch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plainRole, err := srv.RoleByName(ctx, plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	for _, role := range []string{"", plain} {
 		name := "connected role"
 		if role != "" {
@@ -126,10 +168,12 @@ func TestLiveVersionSweep(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			sw := &sweep{t: t, ctx: ctx, srv: srv, role: role}
-			for typeName, recv := range map[string]any{"Server": srv} {
+			for typeName, recv := range map[string]any{"Server": srv, "Database": db, "Role": plainRole} {
 				sw.reflectSweep(typeName, scratch, recv)
 			}
 			sweepServerReads(sw, scratch)
+			sweepDatabases(sw, scratch)
+			sweepRoles(sw, scratch, plain, group)
 			sweepRoutines(sw)
 			sweepFragments(sw)
 			sw.checkCoverage()
@@ -202,6 +246,108 @@ func sweepServerReads(sw *sweep, scratch string) {
 		v, err := sw.srv.passwordVerifier(ctx, "sweep")
 		if err == nil && !strings.HasPrefix(v, "SCRAM-SHA-256$") {
 			err = fmt.Errorf("verifier %.20q…, want SCRAM-SHA-256$…", v)
+		}
+		return err
+	})
+}
+
+// sweepDatabases drives the database reads with an assertion on their rows:
+// the listing narrowed to the scratch database, the by-name read of it and
+// of template0, and the size of template0 — a database that takes no
+// connections, read through the Server's own as every database read is.
+func sweepDatabases(sw *sweep, scratch string) {
+	check := func(d *Database) error {
+		switch {
+		case d.Name != scratch || d.OID == 0 || d.Owner == "" || d.Encoding == "" || d.Tablespace == "":
+			return fmt.Errorf("%+v: want the scratch database with its owner, encoding and tablespace", d)
+		case d.LocaleProvider.String() != "libc" && d.LocaleProvider.String() != "icu" && d.LocaleProvider.String() != "builtin":
+			return fmt.Errorf("LocaleProvider %v: not one pgmo knows", d.LocaleProvider)
+		case d.Comment != "sweep" || len(d.Settings) != 1 || d.Settings[0] != (ParameterSetting{"work_mem", "8MB"}):
+			return fmt.Errorf("Comment %q, Settings %v: want sweep, [work_mem=8MB]", d.Comment, d.Settings)
+		case d.IsTemplate || !d.AllowConnections || d.ConnectionLimit != -1:
+			return fmt.Errorf("IsTemplate %v, AllowConnections %v, ConnectionLimit %d: want a plain database",
+				d.IsTemplate, d.AllowConnections, d.ConnectionLimit)
+		}
+		return nil
+	}
+	sw.call("Server.Databases(scratch)", func(ctx context.Context) error {
+		ds, err := sw.srv.Databases(ctx, ObjectFilter{Name: []TextCriterion{{TextEquals, pgsql.QuoteIdent(scratch)}}})
+		if err != nil {
+			return err
+		}
+		if len(ds) != 1 {
+			return fmt.Errorf("%d databases, want the scratch one alone", len(ds))
+		}
+		return check(ds[0])
+	})
+	sw.call("Server.DatabaseByName(scratch)", func(ctx context.Context) error {
+		d, err := sw.srv.DatabaseByName(ctx, scratch)
+		if err != nil {
+			return err
+		}
+		return check(d)
+	})
+	sw.call("Server.DatabaseByName(template0)", func(ctx context.Context) error {
+		d, err := sw.srv.DatabaseByName(ctx, "template0")
+		if err == nil && (!d.IsTemplate || d.AllowConnections) {
+			err = fmt.Errorf("IsTemplate %v, AllowConnections %v: want a template taking no connections", d.IsTemplate, d.AllowConnections)
+		}
+		return err
+	})
+	sw.call("Database.Size(template0)", func(ctx context.Context) error {
+		n, err := sw.srv.DatabaseRef("template0").Size(ctx)
+		if err == nil && n <= 0 {
+			err = fmt.Errorf("size %d, want > 0", n)
+		}
+		return err
+	})
+}
+
+// sweepRoles drives the role reads with an assertion on their rows: the
+// listing narrowed to the plain role, the by-name read of it, and of
+// pg_monitor — predefined, with members of its own.
+func sweepRoles(sw *sweep, scratch, plain, group string) {
+	check := func(r *Role) error {
+		want := RoleMembership{Role: group, Member: plain, Admin: false, Inherit: true, Set: true}
+		switch {
+		case r.Name != plain || r.OID == 0 || r.IsPredefined() || r.CanLogin || r.Superuser || !r.Inherit:
+			return fmt.Errorf("%+v: want the plain NOLOGIN role", r)
+		case len(r.Settings) != 1 || r.Settings[0] != (ParameterSetting{"work_mem", "8MB"}):
+			return fmt.Errorf("Settings %v: want [work_mem=8MB]", r.Settings)
+		case len(r.DatabaseSettings) != 1 || r.DatabaseSettings[0].Database != scratch ||
+			fmt.Sprint(r.DatabaseSettings[0].Settings) != "[{work_mem 4MB}]":
+			return fmt.Errorf("DatabaseSettings %v: want work_mem=4MB in %s", r.DatabaseSettings, scratch)
+		case len(r.MemberOf) != 1 || r.Members != nil || r.MemberOf[0].Grantor == "":
+			return fmt.Errorf("MemberOf %v, Members %v: want one grant of %s, with its grantor", r.MemberOf, r.Members, group)
+		case func() bool { m := r.MemberOf[0]; m.Grantor = ""; return m != want }():
+			return fmt.Errorf("MemberOf %+v: want %+v", r.MemberOf[0], want)
+		case r.Comment != "sweep" || !r.ValidUntil.IsZero() || r.ConnectionLimit != -1:
+			return fmt.Errorf("Comment %q, ValidUntil %v, ConnectionLimit %d", r.Comment, r.ValidUntil, r.ConnectionLimit)
+		}
+		return nil
+	}
+	sw.call("Server.Roles(plain)", func(ctx context.Context) error {
+		rs, err := sw.srv.Roles(ctx, ObjectFilter{Name: []TextCriterion{{TextEquals, pgsql.QuoteIdent(plain)}}})
+		if err != nil {
+			return err
+		}
+		if len(rs) != 1 {
+			return fmt.Errorf("%d roles, want the plain one alone", len(rs))
+		}
+		return check(rs[0])
+	})
+	sw.call("Server.RoleByName(plain)", func(ctx context.Context) error {
+		r, err := sw.srv.RoleByName(ctx, plain)
+		if err != nil {
+			return err
+		}
+		return check(r)
+	})
+	sw.call("Server.RoleByName(pg_monitor)", func(ctx context.Context) error {
+		r, err := sw.srv.RoleByName(ctx, "pg_monitor")
+		if err == nil && (!r.IsPredefined() || len(r.MemberOf) < 3) {
+			err = fmt.Errorf("IsPredefined %v, MemberOf %v: want predefined, a member of pg_read_all_settings, pg_read_all_stats, pg_stat_scan_tables",
+				r.IsPredefined(), r.MemberOf)
 		}
 		return err
 	})

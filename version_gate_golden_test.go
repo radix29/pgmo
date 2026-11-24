@@ -18,9 +18,8 @@ import (
 // diff a human reads, and the SQL pgmo sends a release the lab does not run
 // is still on record (gosmo's version_gate_golden_test.go).
 //
-// pgmo has no gated reads yet, so goldenQueries is empty and the directory
-// holds only .gitkeep; each check below runs on a fixture as well, so the
-// machinery is proven before the first read relies on it. A read that calls
+// Each check below runs on a fixture as well as on goldenQueries, so the
+// machinery is proven independently of the reads it guards. A read that calls
 // colSince, colUntil or hasColumnSince adds its builder here in the same
 // change (TestEveryGatedCallSiteHasAGoldenQuery holds it to that), then runs
 //
@@ -54,9 +53,21 @@ type goldenQuery struct {
 	render func(num int) string
 }
 
-// goldenQueries are pgmo's gated reads. None exist yet (P2 brings the
-// first); see the file comment.
-var goldenQueries = []goldenQuery{}
+// goldenQueries are pgmo's gated reads; see the file comment.
+var goldenQueries = []goldenQuery{
+	{
+		name:      "database",
+		relations: []string{"pg_database"},
+		columns:   []string{"daticulocale", "datlocale", "daticurules"},
+		render:    databaseSelect,
+	},
+	{
+		name:      "role",
+		relations: []string{"pg_auth_members"},
+		columns:   []string{"inherit_option", "set_option"},
+		render:    roleSelect,
+	},
+}
 
 // covers reports whether g is one of the column gates q is expected to
 // render. A relation gate (g.column == "") is a FROM clause, not a column,

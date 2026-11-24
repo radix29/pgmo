@@ -9,7 +9,7 @@ counterpart of **gosmo** (`~/go/gosmo`, SQL Server's SMO in Go), over
 `github.com/jackc/pgx/v5` used natively (not through `database/sql`). Go 1.27.
 Module `github.com/radix29/pgmo`, MIT.
 
-- **Status: P3 in progress** (P1 and P2 done; P3: `Server.Info` /
+- **Status: P4 in progress** (P1–P3 done; P3: `Server.Info` /
   `ServerInfo` in `server_info.go`; the `information_schema` guard in
   `catalog_source_test.go`; identity in `identity.go`; the row-iteration
   helpers in `rows.go`. Module scaffold done: `go.mod`, `doc.go`,
@@ -38,7 +38,10 @@ Module `github.com/radix29/pgmo`, MIT.
   `ObjectFilter` and its `clause` in `object_filter.go`; `Origin`
   (`IsSystem`, `Extension`) and `IsSystemSchema` in `system_objects.go`;
   the version sweep `TestLiveVersionSweep` in `live_versionsweep_test.go`
-  and its guards in `versionsweep_reflect_test.go`).
+  and its guards in `versionsweep_reflect_test.go`; P4 started: the database
+  reads `Databases`, `DatabaseByName`, `DatabaseRef`, `Database.Size` in
+  `database.go`; the role reads `Roles`, `RoleByName`, `RoleRef` in
+  `role.go`).
   The plan for pgmo *and* pgMS is
   `~/go/pgms/docs/PLAN.md` (`docs/PLAN.md` here points to it); pgmo owns
   phases P1–P6 and shares P14–P16.

@@ -152,6 +152,28 @@ func TestNullIntoAStringFails(t *testing.T) {
 	}
 }
 
+// TestEmptyIsNotNull: an empty value — "" text, an empty bytea — is a value,
+// as on a connection, not NULL; nil and a pgtype.Text that is not Valid are
+// NULL.
+func TestEmptyIsNotNull(t *testing.T) {
+	f := pgmotest.New(t)
+	f.On("FROM t", func(pgmotest.Query) pgmotest.Result {
+		return pgmotest.Result{
+			Types: []uint32{pgtype.TextOID, pgtype.ByteaOID, pgtype.TextOID, pgtype.TextOID},
+			Rows:  [][]any{{"", []byte{}, nil, pgtype.Text{}}},
+		}
+	})
+	var s string
+	var b []byte
+	var n1, n2 *string
+	if err := f.QueryRow(context.Background(), "SELECT a, b, c, d FROM t").Scan(&s, &b, &n1, &n2); err != nil {
+		t.Fatal(err)
+	}
+	if b == nil || n1 != nil || n2 != nil {
+		t.Errorf("bytea %v (nil %v), NULLs %v %v: want an empty bytea and two NULLs", b, b == nil, n1, n2)
+	}
+}
+
 // TestTypesOverrideInference: Result.Types decides the column type; a value
 // pgx cannot encode under it fails the test, naming the query.
 func TestTypesOverrideInference(t *testing.T) {

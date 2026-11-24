@@ -63,7 +63,10 @@ TestGatedQueriesMatchTheirGoldenFiles -updategolden`, then read the diff),
 checks every rendering against `catalogGates`, the select-list arity across
 releases, and that every gate call site has a golden query. A new gated read
 adds its builder to `goldenQueries` in the same change. Each guard has a
-fixture self-test, since pgmo has no gated reads yet.
+fixture self-test as well. The gated reads are `databaseSelect`
+(`testdata/version_gates/database.sql`, P4.1) and `roleSelect`
+(`role.sql`, P4.2). The inventory check reads `true`/`false` as the boolean
+literals they are, not as column references (`boolLiteral`).
 
 ## Architecture
 
@@ -952,6 +955,120 @@ admin pool, as the superuser, a plain role (paths hidden) and a
 `pg_read_all_settings` member (paths shown) — green on pg15–pg18.
 `InRecovery = true` is fake-tested only: the lab has no standby.
 
+### Databases (`database.go`)
+
+Landed P4.1 (reads; the writes are P4.13.1). gosmo's `Database` adapted:
+`Server.Databases(ctx, ObjectFilter)`, `Server.DatabaseByName(ctx, name)`
+(exact, `ErrNotFound`), `Server.DatabaseRef(name)` (lookup-free, `Name`
+only), `Database.Server()`. One read, `databaseSelect(num)`, over
+`pg_database` joined to `pg_tablespace`, through **`s.on(ctx)`** for every
+database — `pg_database` is a shared catalog, and the database described may
+take no connections (template0, `ALLOW_CONNECTIONS false`, an invalid one).
+
+| Field | Source |
+|---|---|
+| `OID`, `Name` | `oid`, `datname` |
+| `Owner` | `pg_get_userbyid(datdba)` |
+| `Encoding` | `pg_encoding_to_char(encoding)` |
+| `LocaleProvider` | `datlocprovider`, the catalog letter (`c`/`i`/`b`; `String()` names it) — reused by collations (P4.11) |
+| `Collate`, `CType` | `datcollate`, `datctype` |
+| `Locale` | `daticulocale` (15–16) / `datlocale` (17+), `colSince`; empty under libc |
+| `ICURules` | `daticurules` (16+), `colSince`; empty on 15 |
+| `CollationVersion` | `datcollversion`; empty when the provider reports none (libc `C.UTF-8` on the lab) |
+| `IsTemplate`, `AllowConnections` | `datistemplate`, `datallowconn` |
+| `ConnectionLimit` | `datconnlimit` as stored: -1 none, -2 invalid (`IsInvalid()`) |
+| `Tablespace` | `pg_tablespace.spcname` of `dattablespace` |
+| `Settings` | `pg_db_role_setting.setconfig` with `setrole = 0` (`ALTER DATABASE … SET`), split at the first `=` into `ParameterSetting{Name, Value}`; nil for none |
+| `Comment` | `shobj_description(oid, 'pg_database')` |
+
+Not gosmo's: no state, recovery model, compatibility level, read-only flag
+or creation date — PostgreSQL has none. Every column is readable by any role
+(checked as a plain role on pg15 and pg18; `pg_db_role_setting` included),
+so the listing shows every database whatever the role's privileges —
+`Server.DatabasePrivileges` says which it may connect to. An `ObjectFilter`
+narrows by name only (`d.datname`); a database has no schema and is not a
+system object by pgmo's rule, so `Schema`/`System`/`ExtensionMember` narrow
+nothing.
+
+**`Database.Size(ctx)`** is `pg_database_size` on demand, not a listing
+column: the server walks every file of the database on each call (psql's `\l`
+leaves it to `\l+` for the same reason). Read through `pg_database` by the
+bound name, so a missing database is `ErrNotFound` rather than `3D000`, and
+it works on a `DatabaseRef`. The server answers a role holding `CONNECT` or
+the privileges of `pg_read_all_stats`, and refuses any other with 42501
+(`IsPermissionDenied`), which `Size` passes through.
+
+Tests: `database_test.go` (pgmotest: every field from its own column, the
+name bound as `$1` and compared exactly, the filter pushed down, NULL
+settings, `ErrNotFound`, the error wrapped once, `Size`'s three outcomes,
+`DatabaseRef` reading nothing); eleven mutations, ten caught, one equivalent
+(`IsInvalid` as `< -1`: no `datconnlimit` is below -2). `TestLiveDatabases`
+on pg15–pg18: an ICU template (rules on 16+) taking no connections, with an
+owner, a limit, a comment, a list setting holding `=`, and a role-in-database
+setting that must not appear; two names differing only by case (builtin
+provider on 17+); `Size` as superuser, through `PUBLIC`'s `CONNECT`, refused
+without it, and answered for a `pg_read_all_stats` member. Dropping the
+`setrole = 0` condition is caught live.
+
+### Roles (`role.go`)
+
+Landed P4.2 (reads; the writes are P4.13.2). PostgreSQL's one principal
+replaces gosmo's `Login` and `ServerRole` (and has no database-user
+counterpart): `Server.Roles(ctx, ObjectFilter)`, `Server.RoleByName(ctx,
+name)` (exact, `ErrNotFound`), `Server.RoleRef(name)` (lookup-free, `Name`
+only), `Role.Server()`. One read, `roleSelect(num)`, over `pg_roles` (any
+role may read it; `pg_authid` is superuser-only and adds only the password
+hash, so whether a role has a password is not read), through **`s.on(ctx)`**
+— `pg_authid`, `pg_auth_members` and `pg_db_role_setting` are shared.
+
+One row per role carries everything: the per-database settings and the
+membership grants in both directions are `array_agg`s in three `LEFT JOIN
+LATERAL` subqueries — parallel arrays sharing one `ORDER BY` per subquery,
+zipped in Go (`membershipArrays.grants`, `groupDatabaseSettings`; arrays of
+different lengths are an error, never a panic). One statement, one snapshot,
+no query in a scan.
+
+| Field | Source |
+|---|---|
+| `OID`, `Name` | `oid`, `rolname` |
+| `Superuser`, `Inherit`, `CreateRole`, `CreateDB`, `CanLogin`, `Replication`, `BypassRLS` | `rolsuper`, `rolinherit`, `rolcreaterole`, `rolcreatedb`, `rolcanlogin`, `rolreplication`, `rolbypassrls` |
+| `ConnectionLimit` | `rolconnlimit`, -1 none |
+| `ValidUntil` | `rolvaliduntil` scanned as `pgtype.Timestamptz`: NULL and `infinity` → zero `Time`, `-infinity` → `ValidUntilNegativeInfinity` (4714-11-24 BC); `PasswordExpired(now)` |
+| `Settings` | `rolconfig` (`pg_db_role_setting` with `setdatabase = 0`), `ParameterSetting`s |
+| `DatabaseSettings` | `pg_db_role_setting` with `setrole = oid` and a database, unnested `WITH ORDINALITY`, grouped by database name |
+| `MemberOf`, `Members` | `pg_auth_members` with `member = oid` / `roleid = oid`, as `RoleMembership{Role, Member, Grantor, Admin, Inherit, Set}`, ordered by the other role's name then the grantor's OID |
+| `Comment` | `shobj_description(oid, 'pg_authid')` |
+
+Membership by release: 16 allows the same role granted more than once by
+different grantors (each its own `RoleMembership`) and records a
+superuser's grant as the bootstrap superuser's. `inherit_option` and
+`set_option` are 16+: before, `Inherit` is the **member's** `rolinherit` —
+`inheritOption(num, alias)`, a `hasColumnSince` branch, since it is a
+different column rather than a rename — and `Set` is `true`. `Grantor` is a
+`LEFT JOIN` to `pg_roles`: on 15 a grantor may have been dropped (its name is
+then empty); from 16 the server refuses that drop.
+
+`IsPredefined()` is `OID < 16384 && OID != 10` (initdb's roles but the
+bootstrap superuser; no `CREATE ROLE` or `RENAME` can take a `pg_` name, and
+`pg_upgrade` refuses a `pg_` user role), `IsBootstrapSuperuser()` is
+`OID == 10`; both derived, false on a `RoleRef`. An `ObjectFilter` narrows by
+name (`r.rolname`) and **`System` selects the predefined roles**
+(`predefinedRoleCondition`); `Schema`/`ExtensionMember` narrow nothing.
+
+Tests: `role_test.go` (pgmotest: every field, both directions and the
+database grouping; the filter's exact tail and `System false`; the pre-16
+substitutes and the 16+ columns; `ValidUntil` for NULL, ±infinity, past and
+future; malformed arrays wrapped once; `RoleRef`; the OID boundaries);
+fourteen offline mutations, thirteen caught, one equivalent (`infinity` not
+mapped explicitly: pgx leaves `Time` zero for an infinite value). Live,
+`TestLiveRoles` on pg15–pg18: every attribute, settings in every database
+and in a throwaway one (whose own setting must not appear), a NOINHERIT
+member, two grants by different grantors (16+) or a dropped grantor (15),
+±infinity, case-only names, the bootstrap superuser, `pg_monitor`'s grants,
+`System` both ways, and the listing read again as a plain role, identical.
+`JOIN` for the grantor's `LEFT JOIN` and a reversed grantor order are caught
+live.
+
 ### Version sweep (`live_versionsweep_test.go`)
 
 gosmo's `TestLiveVersionSweep`, landed P3.8: call every read pgmo sends
@@ -1003,6 +1120,19 @@ named in `sweepNotReads` with why (`InTransaction`, `OpenSession`); stale
 `TestSweepCallUnderARole`, `TestCheckCoverage`. Fourteen mutations caught,
 among them a planted `pg_stat_io` read in `Server.Info` (42P01 on pg15, in
 both passes) and a planted unswept reader. Result: 17 calls per role, 0
+failed, on pg15–pg18.
+
+`Database` is a swept type (P4.1): the scratch database, read by name, is
+swept reflectively (`Database.Size`), and `sweepDatabases` drives the
+listing narrowed to it, the by-name read of it and of template0, and the
+size of template0 (no connections), asserting the fixture's setting and
+comment. Result: 23 calls per role, 0 failed, on pg15–pg18.
+
+`Role` is a swept type (P4.2; no context method of its own yet). The fixture
+adds a group the plain role is a member of, plain's settings in every
+database and in the scratch one, and a comment; `sweepRoles` drives the
+listing narrowed to plain, the by-name read of it (asserting each) and of
+`pg_monitor` (predefined, three grants). Result: 27 calls per role, 0
 failed, on pg15–pg18.
 
 ## Feature map
