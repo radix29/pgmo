@@ -51,3 +51,27 @@ func (r *Role) SetServer(s *Server) { r.server = s }
 // SetDatabase replaces the Schema's back-pointer, so a test can compare the
 // catalog fields of two Schemas with reflect.DeepEqual.
 func (s *Schema) SetDatabase(d *Database) { s.db = d }
+
+// SetDatabase replaces the Table's back-pointer, so a test can compare the
+// catalog fields of two Tables with reflect.DeepEqual.
+func (t *Table) SetDatabase(d *Database) { t.db = d }
+
+// SetDatabase replaces the View's back-pointer, so a test can compare the
+// catalog fields of two Views with reflect.DeepEqual.
+func (v *View) SetDatabase(d *Database) { v.db = d }
+
+// SetDatabase replaces the MaterializedView's back-pointer, so a test can
+// compare the catalog fields of two MaterializedViews with reflect.DeepEqual.
+func (m *MaterializedView) SetDatabase(d *Database) { m.db = d }
+
+// SetDatabase replaces the Function's back-pointer, so a test can compare the
+// catalog fields of two Functions with reflect.DeepEqual.
+func (f *Function) SetDatabase(d *Database) { f.db = d }
+
+// SetDatabase replaces the Procedure's back-pointer, so a test can compare
+// the catalog fields of two Procedures with reflect.DeepEqual.
+func (p *Procedure) SetDatabase(d *Database) { p.db = d }
+
+// SetDatabase replaces the Aggregate's back-pointer, so a test can compare
+// the catalog fields of two Aggregates with reflect.DeepEqual.
+func (a *Aggregate) SetDatabase(d *Database) { a.db = d }

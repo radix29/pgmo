@@ -110,5 +110,23 @@ func originColumns(nspname string, catalog catalogTable, oid string) string {
 	return systemSchema(nspname) + ", " + extensionOf(catalog, oid)
 }
 
+// originJoinColumns read an Origin as originColumns do, in scanOrigin's
+// order, with the extension taken from originJoin's join rather than a
+// subquery per row.
+func originJoinColumns(nspname string) string {
+	return systemSchema(nspname) + ", COALESCE(ext.extname::pg_catalog.text, '')"
+}
+
+// originJoin LEFT JOINs the membership row (pg_depend d) and the extension
+// (pg_extension ext) of the object oid in catalog, for originJoinColumns:
+// the planner prices a subquery per row at an index scan each, so a listing
+// as long as pg_catalog's functions is estimated over jit_above_cost and
+// compiled for seconds, where a join is estimated as the hash join it is.
+// An object is a member of one extension at most, so it adds no row.
+func originJoin(catalog catalogTable, oid string) string {
+	return `LEFT JOIN pg_catalog.pg_depend d ON ` + extensionMembership(catalog, oid) + `
+LEFT JOIN pg_catalog.pg_extension ext ON ext.oid = d.refobjid`
+}
+
 // scanOrigin is originColumns' destinations in o.
 func scanOrigin(o *Origin) []any { return []any{&o.IsSystem, &o.Extension} }

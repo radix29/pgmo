@@ -67,6 +67,12 @@ var goldenQueries = []goldenQuery{
 		columns:   []string{"inherit_option", "set_option"},
 		render:    roleSelect,
 	},
+	{
+		name:      "constraint",
+		relations: []string{"pg_constraint"},
+		columns:   []string{"conenforced"},
+		render:    constraintsQuery,
+	},
 }
 
 // covers reports whether g is one of the column gates q is expected to

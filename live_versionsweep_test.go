@@ -53,6 +53,8 @@ var sweepSchema = []string{
 	`CREATE UNLOGGED TABLE app.scratch (id integer)`,
 	`CREATE VIEW app.parent_names AS SELECT id, name FROM app.parent`,
 	`CREATE MATERIALIZED VIEW app.parent_totals AS SELECT pg_catalog.count(*) AS n FROM app.parent`,
+	`CREATE UNIQUE INDEX parent_totals_n ON app.parent_totals (n)`,
+	`ALTER VIEW app.parent_names SET (security_barrier = on)`,
 	`CREATE SERVER sweep_remote FOREIGN DATA WRAPPER postgres_fdw OPTIONS (host 'sweep.invalid')`,
 	`CREATE FOREIGN TABLE app.remote (id integer) SERVER sweep_remote`,
 	`CREATE SEQUENCE app.seq AS integer`,
@@ -169,6 +171,30 @@ func TestLiveVersionSweep(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	child, err := db.TableByName(ctx, "app", "child")
+	if err != nil {
+		t.Fatal(err)
+	}
+	view, err := db.ViewByName(ctx, "app", "parent_names")
+	if err != nil {
+		t.Fatal(err)
+	}
+	matview, err := db.MaterializedViewByName(ctx, "app", "parent_totals")
+	if err != nil {
+		t.Fatal(err)
+	}
+	touch, err := db.FunctionByName(ctx, "app", "touch", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proc, err := db.ProcedureByName(ctx, "app", "p", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agg, err := db.AggregateByName(ctx, "app", "ag", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	for _, role := range []string{"", plain} {
 		name := "connected role"
@@ -177,13 +203,17 @@ func TestLiveVersionSweep(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			sw := &sweep{t: t, ctx: ctx, srv: srv, role: role}
-			for typeName, recv := range map[string]any{"Server": srv, "Database": db, "Role": plainRole} {
+			for typeName, recv := range map[string]any{"Server": srv, "Database": db, "Role": plainRole, "Table": child,
+				"View": view, "MaterializedView": matview, "Function": touch, "Procedure": proc, "Aggregate": agg} {
 				sw.reflectSweep(typeName, scratch, recv)
 			}
 			sweepServerReads(sw, scratch)
 			sweepDatabases(sw, scratch)
 			sweepRoles(sw, scratch, plain, group)
 			sweepSchemas(sw, db)
+			sweepTables(sw, db)
+			sweepViews(sw, db)
+			sweepRoutineFamilies(sw, db)
 			sweepRoutines(sw)
 			sweepFragments(sw)
 			sw.checkCoverage()
@@ -427,6 +457,292 @@ func sweepSchemas(sw *sweep, db *Database) {
 			return fmt.Errorf("%+v, want %+v", ds, want)
 		}
 		return nil
+	})
+}
+
+// sweepTables drives the table reads with an assertion on their rows: the
+// listing narrowed to app's tables, the by-name read of app.child, and each
+// read of a table's parts on the fixture table that has one — app.parent's
+// columns and comment, app.child's keys, index, trigger and policy,
+// app.part's partition and size.
+func sweepTables(sw *sweep, db *Database) {
+	byName := func(ctx context.Context, name string) (*Table, error) {
+		return db.TableByName(ctx, "app", name)
+	}
+	sw.call("Database.Tables(app)", func(ctx context.Context) error {
+		ts, err := db.Tables(ctx, ObjectFilter{Schema: []TextCriterion{{TextEquals, "app"}}})
+		if err != nil {
+			return err
+		}
+		var names []string
+		for _, t := range ts {
+			names = append(names, t.Name)
+		}
+		if want := []string{"child", "parent", "part", "part_2026", "scratch"}; !slices.Equal(names, want) {
+			return fmt.Errorf("tables %q, want %q", names, want)
+		}
+		return nil
+	})
+	sw.call("Database.TableByName(app.parent)", func(ctx context.Context) error {
+		t, err := byName(ctx, "parent")
+		if err == nil && (t.OID == 0 || t.Owner == "" || t.Kind != RelationTable || t.Comment != "sweep" || t.RowEstimate != 2 ||
+			!t.PrivilegesDefault || len(t.Privileges) == 0 || t.Origin != (Origin{})) {
+			err = fmt.Errorf("%+v: want the commented table, analyzed with 2 rows, its ACL never set", t)
+		}
+		return err
+	})
+	sw.call("Table.Columns(app.parent)", func(ctx context.Context) error {
+		t, err := byName(ctx, "parent")
+		if err != nil {
+			return err
+		}
+		cs, err := t.Columns(ctx)
+		if err == nil && (len(cs) != 3 || cs[1].Type != "app.citext" || !cs[1].NotNull || cs[2].Type != "numeric(18,2)") {
+			err = fmt.Errorf("%d columns: want id, name app.citext NOT NULL, amount numeric(18,2)", len(cs))
+		}
+		return err
+	})
+	sw.call("Table.Constraints(app.child)", func(ctx context.Context) error {
+		t, err := byName(ctx, "child")
+		if err != nil {
+			return err
+		}
+		cs, err := t.Constraints(ctx)
+		if err != nil {
+			return err
+		}
+		kinds := map[ConstraintKind]int{}
+		for _, c := range cs {
+			kinds[c.Kind]++
+		}
+		if kinds[ConstraintPrimaryKey] != 1 || kinds[ConstraintForeignKey] != 1 || kinds[ConstraintCheck] != 1 {
+			return fmt.Errorf("%+v: want a primary key, a foreign key and a check", kinds)
+		}
+		return nil
+	})
+	sw.call("Table.Indexes(app.child)", func(ctx context.Context) error {
+		t, err := byName(ctx, "child")
+		if err != nil {
+			return err
+		}
+		xs, err := t.Indexes(ctx)
+		if err == nil && (len(xs) != 2 || xs[0].Name != "child_parent" || !slices.Equal(xs[0].IncludedColumns, []string{"note"})) {
+			err = fmt.Errorf("%d indexes: want child_parent INCLUDE (note) and the key's", len(xs))
+		}
+		return err
+	})
+	sw.call("Table.Triggers(app.child)", func(ctx context.Context) error {
+		t, err := byName(ctx, "child")
+		if err != nil {
+			return err
+		}
+		ts, err := t.Triggers(ctx)
+		if err == nil && (len(ts) != 1 || ts[0].Name != "child_touch" || ts[0].Timing != TriggerBefore) {
+			err = fmt.Errorf("%d triggers: want child_touch BEFORE, no foreign key trigger", len(ts))
+		}
+		return err
+	})
+	sw.call("Table.Policies(app.child)", func(ctx context.Context) error {
+		t, err := byName(ctx, "child")
+		if err != nil {
+			return err
+		}
+		ps, err := t.Policies(ctx)
+		if err == nil && (len(ps) != 1 || ps[0].Name != "child_all" || ps[0].Using != "true" || !t.RowSecurity) {
+			err = fmt.Errorf("%d policies, RowSecurity %v: want child_all USING (true), enabled", len(ps), t.RowSecurity)
+		}
+		return err
+	})
+	sw.call("Table.Children(app.part)", func(ctx context.Context) error {
+		t, err := byName(ctx, "part")
+		if err != nil {
+			return err
+		}
+		cs, err := t.Children(ctx)
+		if err == nil && (len(cs) != 1 || cs[0].Name != "part_2026" || !strings.HasPrefix(cs[0].PartitionBound, "FOR VALUES FROM")) {
+			err = fmt.Errorf("%+v: want part_2026 with its bound", cs)
+		}
+		return err
+	})
+	sw.call("Table.Size(app.parent)", func(ctx context.Context) error {
+		t, err := byName(ctx, "parent")
+		if err != nil {
+			return err
+		}
+		sz, err := t.Size(ctx)
+		if err == nil && (sz.Data <= 0 || sz.Indexes <= 0 || sz.Total != sz.Data+sz.Indexes) {
+			err = fmt.Errorf("%+v: want data and indexes, Total their sum", sz)
+		}
+		return err
+	})
+}
+
+// sweepViews drives the view and materialized view reads with an assertion
+// on their rows: both listings narrowed to app, both by-name reads, and each
+// part read on app.parent_names and app.parent_totals.
+func sweepViews(sw *sweep, db *Database) {
+	app := ObjectFilter{Schema: []TextCriterion{{TextEquals, "app"}}}
+	sw.call("Database.Views(app)", func(ctx context.Context) error {
+		vs, err := db.Views(ctx, app)
+		if err == nil && (len(vs) != 1 || vs[0].Name != "parent_names") {
+			err = fmt.Errorf("%d views: want app.parent_names alone", len(vs))
+		}
+		return err
+	})
+	sw.call("Database.ViewByName(app.parent_names)", func(ctx context.Context) error {
+		v, err := db.ViewByName(ctx, "app", "parent_names")
+		if err == nil && (v.OID == 0 || v.Owner == "" || !strings.Contains(v.Definition, "FROM app.parent") ||
+			!v.SecurityBarrier || v.SecurityInvoker || v.CheckOption != CheckOptionNone || len(v.Options) != 1 ||
+			!v.PrivilegesDefault || len(v.Privileges) == 0) {
+			err = fmt.Errorf("%+v: want the security_barrier view over app.parent, its ACL never set", v)
+		}
+		return err
+	})
+	sw.call("View.Columns(app.parent_names)", func(ctx context.Context) error {
+		v, err := db.ViewByName(ctx, "app", "parent_names")
+		if err != nil {
+			return err
+		}
+		cs, err := v.Columns(ctx)
+		if err == nil && (len(cs) != 2 || cs[0].Name != "id" || cs[1].Type != "app.citext") {
+			err = fmt.Errorf("%d columns: want id, name app.citext", len(cs))
+		}
+		return err
+	})
+	sw.call("Database.MaterializedViews(app)", func(ctx context.Context) error {
+		ms, err := db.MaterializedViews(ctx, app)
+		if err == nil && (len(ms) != 1 || ms[0].Name != "parent_totals") {
+			err = fmt.Errorf("%d materialized views: want app.parent_totals alone", len(ms))
+		}
+		return err
+	})
+	sw.call("Database.MaterializedViewByName(app.parent_totals)", func(ctx context.Context) error {
+		m, err := db.MaterializedViewByName(ctx, "app", "parent_totals")
+		if err == nil && (m.OID == 0 || !m.Populated || !strings.Contains(m.Definition, "count(*)") || !m.PrivilegesDefault) {
+			err = fmt.Errorf("%+v: want the populated count over app.parent", m)
+		}
+		return err
+	})
+	sw.call("MaterializedView.Columns(app.parent_totals)", func(ctx context.Context) error {
+		m, err := db.MaterializedViewByName(ctx, "app", "parent_totals")
+		if err != nil {
+			return err
+		}
+		cs, err := m.Columns(ctx)
+		if err == nil && (len(cs) != 1 || cs[0].Name != "n" || cs[0].Type != "bigint") {
+			err = fmt.Errorf("%d columns: want n bigint", len(cs))
+		}
+		return err
+	})
+	sw.call("MaterializedView.Indexes(app.parent_totals)", func(ctx context.Context) error {
+		m, err := db.MaterializedViewByName(ctx, "app", "parent_totals")
+		if err != nil {
+			return err
+		}
+		xs, err := m.Indexes(ctx)
+		if err == nil && (len(xs) != 1 || xs[0].Name != "parent_totals_n" || !xs[0].Unique) {
+			err = fmt.Errorf("%d indexes: want the unique parent_totals_n", len(xs))
+		}
+		return err
+	})
+	sw.call("MaterializedView.Size(app.parent_totals)", func(ctx context.Context) error {
+		m, err := db.MaterializedViewByName(ctx, "app", "parent_totals")
+		if err != nil {
+			return err
+		}
+		sz, err := m.Size(ctx)
+		if err == nil && (sz.Data <= 0 || sz.Indexes <= 0 || sz.Total != sz.Data+sz.Indexes) {
+			err = fmt.Errorf("%+v: want data and an index, Total their sum", sz)
+		}
+		return err
+	})
+}
+
+// sweepRoutineFamilies drives the function, procedure and aggregate reads
+// with an assertion on their rows: the three listings narrowed to app, the
+// three by-name reads (the overloads both ways), both bodies, and the
+// any-kind identity read.
+func sweepRoutineFamilies(sw *sweep, db *Database) {
+	app := ObjectFilter{Schema: []TextCriterion{{TextEquals, "app"}}, ExtensionMember: new(bool)}
+	sw.call("Database.Functions(app)", func(ctx context.Context) error {
+		fs, err := db.Functions(ctx, app)
+		if err == nil && (len(fs) != 3 || fs[0].Name != "f" || fs[1].Name != "f" || fs[2].Name != "touch") {
+			err = fmt.Errorf("%d functions: want app.f twice and app.touch", len(fs))
+		}
+		return err
+	})
+	sw.call("Database.FunctionByName(app.f)", func(ctx context.Context) error {
+		_, err := db.FunctionByName(ctx, "app", "f", nil)
+		if errors.Is(err, ErrAmbiguous) {
+			return nil
+		}
+		return fmt.Errorf("two overloads: %v, want ErrAmbiguous", err)
+	})
+	sw.call("Database.FunctionByName(app.f, integer)", func(ctx context.Context) error {
+		f, err := db.FunctionByName(ctx, "app", "f", []OID{23})
+		if err == nil && (f.Signature() != "app.f(integer)" || f.Language != "sql" || f.ReturnType != "integer" ||
+			len(f.Arguments) != 1 || f.Arguments[0].Name != "x" || f.Volatility != VolatilityVolatile || f.Cost != 100) {
+			err = fmt.Errorf("%+v: want the sql function app.f(x integer) RETURNS integer", f)
+		}
+		return err
+	})
+	sw.call("Function.Body(app.f, integer)", func(ctx context.Context) error {
+		f, err := db.FunctionByName(ctx, "app", "f", []OID{23})
+		if err != nil {
+			return err
+		}
+		b, err := f.Body(ctx)
+		if err == nil && (b.Source != "SELECT x" || !strings.HasPrefix(b.Definition, "CREATE OR REPLACE FUNCTION app.f(x integer)")) {
+			err = fmt.Errorf("%+v: want SELECT x in its CREATE OR REPLACE", b)
+		}
+		return err
+	})
+	sw.call("Database.Procedures(app)", func(ctx context.Context) error {
+		ps, err := db.Procedures(ctx, app)
+		if err == nil && (len(ps) != 1 || ps[0].Name != "p") {
+			err = fmt.Errorf("%d procedures: want app.p alone", len(ps))
+		}
+		return err
+	})
+	sw.call("Database.ProcedureByName(app.p)", func(ctx context.Context) error {
+		p, err := db.ProcedureByName(ctx, "app", "p", nil)
+		if err == nil && (p.Signature() != "app.p(integer)" || len(p.Arguments) != 1 || p.Arguments[0].Mode != ArgumentInOut) {
+			err = fmt.Errorf("%+v: want app.p(INOUT a integer)", p)
+		}
+		return err
+	})
+	sw.call("Procedure.Body(app.p)", func(ctx context.Context) error {
+		p, err := db.ProcedureByName(ctx, "app", "p", nil)
+		if err != nil {
+			return err
+		}
+		b, err := p.Body(ctx)
+		if err == nil && (b.Source != "SELECT a" || !strings.HasPrefix(b.Definition, "CREATE OR REPLACE PROCEDURE app.p(")) {
+			err = fmt.Errorf("%+v: want SELECT a in its CREATE OR REPLACE", b)
+		}
+		return err
+	})
+	sw.call("Database.Aggregates(app)", func(ctx context.Context) error {
+		as, err := db.Aggregates(ctx, app)
+		if err == nil && (len(as) != 1 || as[0].Name != "ag") {
+			err = fmt.Errorf("%d aggregates: want app.ag alone", len(as))
+		}
+		return err
+	})
+	sw.call("Database.AggregateByName(app.ag)", func(ctx context.Context) error {
+		a, err := db.AggregateByName(ctx, "app", "ag", []OID{})
+		if err == nil && (a.TransitionFunction != (ObjectName{"pg_catalog", "int8inc"}) || a.StateType != "bigint" ||
+			a.InitialCondition != "0" || !a.HasInitialCondition || a.AggregateKind != AggregateNormal) {
+			err = fmt.Errorf("%+v: want app.ag(*) over int8inc from 0", a)
+		}
+		return err
+	})
+	sw.call("Database.RoutineByName(app.touch)", func(ctx context.Context) error {
+		r, err := db.RoutineByName(ctx, "app", "touch", nil)
+		if err == nil && (r.Kind != RoutineFunction || r.Signature() != "app.touch()") {
+			err = fmt.Errorf("%s (%v), want the function app.touch()", r.Signature(), r.Kind)
+		}
+		return err
 	})
 }
 

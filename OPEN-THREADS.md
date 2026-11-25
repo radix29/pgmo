@@ -16,8 +16,8 @@ sends, as the connected role and as a plain one, and reports what the server
 rejects. A sweep of 0 failures is not proof on its own — the `-v` log lists
 every label called, and `sweepMustCall` fails one never reached.
 
-Last result (2026-11-21, P3.8): 17 calls per role, 0 failed, 0 refused, on
-pg15.20, pg16.16, pg17.12 and pg18.7.
+Last result (2026-11-25, P4.4): 50 calls per role, 0 failed, 0 refused, on
+pg15–pg18.
 
 What the sweep does not reach yet: the P4 families' listings join it as they
 land (a family type goes in `sweptTypes`; a read it sends fails
@@ -30,7 +30,10 @@ lands; known ones are in `ARCHITECTURE.md` § Version gating):
 
 | Column or construct | Held by |
 |---|---|
-| — | — |
+| `pg_constraint.conenforced` (18) | `constraintsQuery` (`colSince`, `true` before), `constraint.sql`, `TestTableConstraints`, `TestLiveTables` (NOT ENFORCED on 18) |
+| `pg_attribute.attstattarget` (`int4` 15–16, nullable `int2` 17+) | ungated: `COALESCE(…, -1)::integer` reads both; `TestLiveTables` on pg15–pg18 |
+| NOT NULL as `pg_constraint` rows (18) | ungated: listed when present; `TestLiveTables` |
+| `attgenerated = 'v'` (18) | ungated value: `GeneratedVirtual`; `TestLiveTables` on 18 |
 
 ## Lab: what it can and cannot exercise
 
@@ -174,13 +177,13 @@ warn in the password dialog when `scram.Normalize(p)` differs from NFC(p)
 
 ## Identity: what P3.3 left for the families
 
-`RoutineIdentity` and `routineByName` (`identity.go`) have no exported caller
-yet: P4.6's `FunctionByName`/`ProcedureByName`/`AggregateByName` embed and
-wrap them (adding the `pgmo: ` prefix). A caller naming an overload has
-argument type OIDs only; looking one up by type *names* needs those names
-resolved server-side (`to_regtype`) — qualified, or the session's
-`search_path` decides — and is left to P4.6. The P5 scripter must write a
-zero-argument aggregate as `AGGREGATE s.ag(*)` (or use `ROUTINE`):
+P4.6's families embed `RoutineIdentity` and share `routineByName`'s overload
+rule (`pickOverload`); `Database.RoutineByName` exports the lookup. Still
+open: a caller naming an overload has argument type OIDs only; looking one
+up by type *names* needs those names resolved server-side (`to_regtype`) —
+qualified, or the session's `search_path` decides — a helper pgmo does not
+have yet (`…Ref` takes names, for writes, unresolved). The P5 scripter must
+write a zero-argument aggregate as `AGGREGATE s.ag(*)` (or use `ROUTINE`):
 `Signature()` gives `s.ag()`.
 
 ## System objects: what P3.7 left for the families
@@ -250,6 +253,80 @@ scripter writes `CREATE EXTENSION` for a member, never the member's DDL.
   left to the caller or to P5's scripter.
 - **Not read yet:** schema size (sum of its relations, P4.4/P6), objects
   per schema, security labels.
+
+## Tables: what P4.4 left
+
+- **Rendered text follows the caller's `search_path`.** `Column.Default`,
+  `GenerationExpression`, `PartitionBound`, `Constraint.Definition`,
+  `Index.Definition`/`KeyColumns`/`Predicate`, `Trigger.Definition` and
+  `Policy.Using`/`WithCheck` come from `pg_get_*`, which leave a name
+  visible on the session's path unqualified (`ARCHITECTURE.md` § Tables).
+  Fine for display, as psql; the P5 scripter must render them under a fixed
+  path — `SET LOCAL search_path = pg_catalog, pg_temp` in a read-only
+  transaction, as `pg_dump` sets `search_path = ''` — so its DDL means the
+  same in any session.
+- **One table at a time.** Each part is one statement per table; the P5
+  scripter (and a Columns pane over a whole schema) wants each part for
+  many tables in one statement, grouped in Go (`conrelid = ANY($1)`).
+  Add batch forms then; the scan functions are already per row.
+- **No sizes with the listing.** `Table.Size` is one round trip per table,
+  as `Database.Size`; a partitioned table's own size is 0 — summing its
+  partitions (`pg_partition_tree`) is left to the caller or P6.
+- **Not read yet:** identity sequence options (P4.7, `pg_get_serial_sequence`
+  / the owned-by link), `attcompression`, `attoptions` (per-column
+  `n_distinct`), `attfdwoptions` (P4.12), `confdelsetcols` (`ON DELETE SET
+  NULL (cols)` — in `Definition`), `conperiod` (18, `WITHOUT OVERLAPS` /
+  `PERIOD` — in `Definition`), a partitioned index's parent
+  (`pg_inherits` over indexes), replica identity (`relreplident`, P14),
+  the table access method (`relam`), typed tables (`reloftype`),
+  `relallfrozen` (18), rules (`pg_rewrite`, shown on their table, P8.2) and
+  extended statistics (`pg_statistic_ext`, P8.2), security labels.
+- **Effective privileges** on a table or column (`has_table_privilege`,
+  `has_column_privilege`) are left with the other families' to
+  P4.13.4/P5, as § Schemas says.
+
+## Views: what P4.5 left
+
+- **`Definition` follows the caller's `search_path`**, as every rendered
+  expression in § Tables: `pg_get_viewdef` writes `FROM t` for `app.t`
+  when `app` is on the path (pinned by `TestLiveViews`). The P5 scripter
+  renders it under a fixed path, as § Tables says. It is the non-pretty
+  form (`pg_dump`'s), with the leading space and closing semicolon the
+  server gives; a properties pane may want `pg_get_viewdef(oid, true)` —
+  add a field or a method then, not a second listing.
+- **A view's triggers and rules.** `INSTEAD OF` triggers on a view are
+  P4.9's (`Table.Triggers`' query is keyed by OID and would serve as is);
+  rules other than the view's own `_RETURN` (`pg_rewrite`) are P8.2's, with
+  a table's.
+- **Not read yet:** whether a view is automatically updatable
+  (`pg_relation_is_updatable`, `pg_column_is_updatable`), the column list
+  of `CREATE VIEW v (a, b)` beyond what `Columns` shows, recursive views
+  (stored as a plain query over a CTE — no flag), a materialized view's
+  table access method (`relam`), the query's dependencies (P4.14,
+  `pg_depend` via `pg_rewrite`).
+- **One view at a time**, as § Tables: each part is a statement per view.
+
+## Routines: what P4.6 left
+
+- **Rendered text follows the caller's `search_path`**: `Result`,
+  `IdentityArguments`, `RoutineArgument.Default` and `Body`'s definition
+  (pinned by `TestLiveRoutines`). The P5 scripter renders under a fixed
+  path, as § Tables.
+- **Not read:** `TRANSFORM FOR TYPE` (`protrftypes`), a C function's
+  `AS 'obj', 'sym'` as fields beyond `ObjectFile` + `Body.Source`, a
+  routine's dependencies (P4.14; a SQL-standard body's are in `pg_depend`),
+  an aggregate's `HYPOTHETICAL` / `PARALLEL` beyond the kind and
+  `Parallel`, the `FINALFUNC_EXTRA` dummy argument types.
+- **Event triggers' and triggers' functions** are `Function`s of return
+  type `trigger` / `event_trigger`; P4.9 links them, nothing here flags
+  them.
+- **An aggregate by-name read is ~60 ms**, most of it planning its
+  thirty-odd joins (the aggregate's eight functions, three types, sort
+  operator). Fine for a properties pane; a pgMS hover over many aggregates
+  should read the listing once instead.
+- **The JIT finding** (ARCHITECTURE.md § Routines) applies to every listing
+  that can be long: tables, types and operators of a large database. Not
+  re-measured for P4.4/P4.5 (their system listings are a few hundred rows).
 
 ## Flaky: `TestDatabasePoolsUnderConcurrency`
 

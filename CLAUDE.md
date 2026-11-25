@@ -42,7 +42,17 @@ Module `github.com/radix29/pgmo`, MIT.
   reads `Databases`, `DatabaseByName`, `DatabaseRef`, `Database.Size` in
   `database.go`; the role reads `Roles`, `RoleByName`, `RoleRef` in
   `role.go`; the schema reads `Schemas`, `SchemaByName`, `SchemaRef` in
-  `schema.go`, ACLs and `Database.DefaultPrivileges` in `privileges.go`).
+  `schema.go`, ACLs and `Database.DefaultPrivileges` in `privileges.go`;
+  the table reads `Tables`, `TableByName`, `TableRef` and a table's parts —
+  `Columns`, `Constraints`, `Indexes`, `Triggers`, `Policies`, `Children`,
+  `Size` — in `table.go`, `table_column.go`, `table_constraint.go`,
+  `index.go`, `trigger.go`, `policy.go`; the view reads `Views`,
+  `ViewByName`, `ViewRef`, `MaterializedViews`, `MaterializedViewByName`,
+  `MaterializedViewRef` and their `Columns`, `Indexes`, `Size` in
+  `view.go`; the routine reads `Functions`, `FunctionByName`,
+  `FunctionRef`, `Procedures`, `ProcedureByName`, `ProcedureRef`,
+  `Aggregates`, `AggregateByName`, `AggregateRef`, `RoutineByName` and the
+  bodies `Function.Body`, `Procedure.Body` in `routine.go`).
   The plan for pgmo *and* pgMS is
   `~/go/pgms/docs/PLAN.md` (`docs/PLAN.md` here points to it); pgmo owns
   phases P1–P6 and shares P14–P16.
@@ -152,6 +162,11 @@ section overrides them. In short:
 - **Never query inside a `rows.Next()` loop** — nor in a scan handed to a
   read helper (`TestNoQueryInsideARowScan`). Fetch children in one query,
   group in Go.
+- **A listing that can be long joins, never a subquery per row** (a
+  `LATERAL` per row, a scalar subquery, `obj_description`): the planner's
+  estimate crosses `jit_above_cost` and the server spends seconds compiling
+  (5 s for pg_catalog's functions; `ARCHITECTURE.md` § Routines). Check a
+  new listing's `EXPLAIN` cost on pg_catalog's rows.
 - **Quoting**: `pgsql/` (stdlib only) is the authority — `QuoteIdent`,
   `QualifiedName`, `QuoteLiteral`. A name inside a literal needs both.
   Prefer a bound parameter (`$1`) wherever PostgreSQL accepts one.

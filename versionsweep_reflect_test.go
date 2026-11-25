@@ -31,6 +31,14 @@ var sweptTypes = map[string]reflect.Type{
 	"Database": reflect.TypeFor[*Database](),
 	"Role":     reflect.TypeFor[*Role](),
 	"Schema":   reflect.TypeFor[*Schema](),
+	"Table":    reflect.TypeFor[*Table](),
+
+	"View":             reflect.TypeFor[*View](),
+	"MaterializedView": reflect.TypeFor[*MaterializedView](),
+
+	"Function":  reflect.TypeFor[*Function](),
+	"Procedure": reflect.TypeFor[*Procedure](),
+	"Aggregate": reflect.TypeFor[*Aggregate](),
 }
 
 // sweepSkip names the context-only methods the sweep must not call because
@@ -70,6 +78,30 @@ var sweepReaders = map[string]string{
 	"Database.Schemas":           "Database.Schemas",
 	"Database.SchemaByName":      "Database.SchemaByName",
 	"Database.DefaultPrivileges": "Database.DefaultPrivileges",
+	"Database.Tables":            "Database.Tables",
+	"Database.TableByName":       "Database.TableByName",
+	"Table.Columns":              "Table.Columns",
+	"Table.Constraints":          "Table.Constraints",
+	"Table.Indexes":              "Table.Indexes",
+	"Table.Triggers":             "Table.Triggers",
+	"Table.Policies":             "Table.Policies",
+	"Table.Children":             "Table.Children",
+	"Table.Size":                 "Table.Size",
+
+	"Database.Views":                  "Database.Views",
+	"Database.ViewByName":             "Database.ViewByName",
+	"View.Columns":                    "View.Columns",
+	"Database.MaterializedViews":      "Database.MaterializedViews",
+	"Database.MaterializedViewByName": "Database.MaterializedViewByName",
+	"MaterializedView.Columns":        "MaterializedView.Columns",
+	"MaterializedView.Indexes":        "MaterializedView.Indexes",
+	"MaterializedView.Size":           "MaterializedView.Size",
+
+	// The routine families' shared readers, each driven through every
+	// family (sweepMustCall lists all three).
+	"listRoutines":        "Database.Functions",
+	"routineFamilyByName": "Database.FunctionByName",
+	"readBody":            "Function.Body",
 }
 
 // sweepMustCall names every read the live sweep must reach, by hand or
@@ -82,8 +114,8 @@ var sweepReaders = map[string]string{
 var sweepMustCall = []string{
 	// The reads sweepReaders maps: the connect-time version read; the three
 	// Server reads (reflective, listed in case that stops); the SCRAM
-	// iteration count a password write reads first; the routine lookup the
-	// P4.6 families will use.
+	// iteration count a password write reads first; the any-kind routine
+	// lookup under Database.RoutineByName.
 	"NewServer",
 	"Server.Info",
 	"Server.Capabilities",
@@ -109,6 +141,47 @@ var sweepMustCall = []string{
 	"Database.Schemas",
 	"Database.SchemaByName",
 	"Database.DefaultPrivileges",
+
+	// The table family (P4.4): the listing (reflective on the scratch
+	// database, and by hand with a filter), the by-name read, and each read
+	// of a table's parts (reflective on app.child, and by hand on the
+	// fixture's tables, asserting their rows).
+	"Database.Tables",
+	"Database.TableByName",
+	"Table.Columns",
+	"Table.Constraints",
+	"Table.Indexes",
+	"Table.Triggers",
+	"Table.Policies",
+	"Table.Children",
+	"Table.Size",
+
+	// The view family (P4.5): both listings (reflective on the scratch
+	// database, and by hand with a filter), both by-name reads, and each
+	// part read (reflective on the fixture's view and materialized view,
+	// and by hand asserting their rows).
+	"Database.Views",
+	"Database.ViewByName",
+	"View.Columns",
+	"Database.MaterializedViews",
+	"Database.MaterializedViewByName",
+	"MaterializedView.Columns",
+	"MaterializedView.Indexes",
+	"MaterializedView.Size",
+
+	// The routine families (P4.6): the three listings (reflective on the
+	// scratch database, and by hand with a filter), the three by-name reads
+	// (the family's shared readers, so each family's select is sent), the
+	// two bodies (reflective and by hand), and the any-kind identity read.
+	"Database.Functions",
+	"Database.FunctionByName",
+	"Function.Body",
+	"Database.Procedures",
+	"Database.ProcedureByName",
+	"Procedure.Body",
+	"Database.Aggregates",
+	"Database.AggregateByName",
+	"Database.RoutineByName",
 
 	// The query fragments the P4 families will build their listings from.
 	// No read sends them yet, so the sweep runs each in a query of its own,

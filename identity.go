@@ -124,32 +124,52 @@ func (r *RoutineIdentity) SameArguments(types []OID) bool {
 	return slices.Equal(r.ArgumentTypes, types)
 }
 
+// typeName is a text expression naming, as DDL writes it, the type joined
+// as alias by typeJoins — built here rather than taken from format_type,
+// pg_get_function_identity_arguments or regprocedure, which leave a type
+// unqualified when the session's search_path finds it, so a name read under
+// one path names another type, or none, under the next. A type in
+// pg_catalog is format_type's name ("double precision", "\"char\"",
+// "text[]"; qualified by format_type itself in the odd session whose path
+// shadows it); any other is its schema and name quoted, and an array of one
+// (its element type's typarray, as format_type tests) is the element's name
+// with "[]" — the array's own name ("_ty") would resolve as well, but nobody
+// writes it. No type modifier is written: the OIDs it is used on (argument,
+// result and state types) carry none. NULL when a typeJoins LEFT JOIN found
+// no type (OID 0).
+func typeName(alias string) string {
+	t, tn, e, en := alias, alias+"n", alias+"e", alias+"en"
+	return `CASE
+			WHEN ` + tn + `.nspname = 'pg_catalog' THEN pg_catalog.format_type(` + t + `.oid, NULL)
+			WHEN ` + e + `.oid IS NOT NULL THEN pg_catalog.quote_ident(` + en + `.nspname) || '.' || pg_catalog.quote_ident(` + e + `.typname) || '[]'
+			ELSE pg_catalog.quote_ident(` + tn + `.nspname) || '.' || pg_catalog.quote_ident(` + t + `.typname)
+		END`
+}
+
+// typeJoins joins the type whose OID is the expression oid as alias, with
+// what typeName reads: its schema (alias+"n"), and the element type an
+// array is of (alias+"e") with its schema (alias+"en"). join is "JOIN" for
+// an OID always set, "LEFT JOIN" for one that may be 0. Joins rather than a
+// scalar subquery per type: the planner prices a subquery per unnested
+// element high enough that a listing of pg_catalog's functions crossed
+// jit_above_cost and spent seconds compiling (found on pg15 and pg18).
+func typeJoins(join, oid, alias string) string {
+	t, tn, e, en := alias, alias+"n", alias+"e", alias+"en"
+	return join + ` pg_catalog.pg_type ` + t + ` ON ` + t + `.oid = ` + oid + `
+		` + join + ` pg_catalog.pg_namespace ` + tn + ` ON ` + tn + `.oid = ` + t + `.typnamespace
+		LEFT JOIN pg_catalog.pg_type ` + e + ` ON ` + e + `.oid = ` + t + `.typelem AND ` + e + `.typarray = ` + t + `.oid
+		LEFT JOIN pg_catalog.pg_namespace ` + en + ` ON ` + en + `.oid = ` + e + `.typnamespace`
+}
+
 // routineIdentityColumns reads a RoutineIdentity from pg_proc p joined to
-// pg_namespace n on p.pronamespace, in scanRoutineIdentity's order.
-//
-// The argument type names are built here rather than taken from
-// pg_get_function_identity_arguments or regprocedure, whose format_type
-// leaves a type unqualified when the session's search_path finds it — a
-// signature read under one path then names another type, or none, under the
-// next. A type in pg_catalog is format_type's name ("double precision",
-// "\"char\"", "text[]"; qualified by format_type itself in the odd session
-// whose path shadows it); any other is its schema and name quoted, and an
-// array of one (its element type's typarray, as format_type tests) is the
-// element's name with "[]" — the array's own name ("_ty") would resolve as
-// well, but nobody writes it. proargtypes carries no typmods, so none is
-// lost.
-const routineIdentityColumns = `p.oid, n.nspname, p.proname, p.prokind::pg_catalog.text,
+// pg_namespace n on p.pronamespace, in scanRoutineIdentity's order. The
+// argument type names are typeName's. proargtypes carries no typmods, so
+// none is lost.
+var routineIdentityColumns = `p.oid, n.nspname, p.proname, p.prokind::pg_catalog.text,
 	p.proargtypes::pg_catalog.oid[],
-	ARRAY(SELECT CASE
-			WHEN tn.nspname = 'pg_catalog' THEN pg_catalog.format_type(t.oid, NULL)
-			WHEN e.oid IS NOT NULL THEN pg_catalog.quote_ident(en.nspname) || '.' || pg_catalog.quote_ident(e.typname) || '[]'
-			ELSE pg_catalog.quote_ident(tn.nspname) || '.' || pg_catalog.quote_ident(t.typname)
-		END
+	ARRAY(SELECT ` + typeName("t") + `
 		FROM pg_catalog.unnest(p.proargtypes::pg_catalog.oid[]) WITH ORDINALITY AS a(oid, n)
-		JOIN pg_catalog.pg_type t ON t.oid = a.oid
-		JOIN pg_catalog.pg_namespace tn ON tn.oid = t.typnamespace
-		LEFT JOIN pg_catalog.pg_type e ON e.oid = t.typelem AND e.typarray = t.oid
-		LEFT JOIN pg_catalog.pg_namespace en ON en.oid = e.typnamespace
+		` + typeJoins("JOIN", "a.oid", "t") + `
 		ORDER BY a.n),
 	pg_catalog.pg_get_function_identity_arguments(p.oid)`
 
@@ -160,7 +180,7 @@ func scanRoutineIdentity(r *RoutineIdentity) []any {
 
 // routinesByNameQuery reads every routine named $2 in schema $1, by OID so
 // the order is stable.
-const routinesByNameQuery = `SELECT ` + routineIdentityColumns + `
+var routinesByNameQuery = `SELECT ` + routineIdentityColumns + `
 	FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
 	WHERE n.nspname = $1 AND p.proname = $2
 	ORDER BY p.oid`
@@ -183,21 +203,37 @@ func routineByName(ctx context.Context, q Querier, schema, name string, args []O
 	if err != nil {
 		return nil, fmt.Errorf("read routine %s: %w", qualified, err)
 	}
+	r, err := pickOverload(found, func(r *RoutineIdentity) *RoutineIdentity { return r }, args, "routine")
+	if err != nil {
+		return nil, fmt.Errorf("read routine %s: %w", qualified, err)
+	}
+	return r, nil
+}
+
+// pickOverload picks from found — the routines of one schema and name, of
+// the family kind names ("function", "routine") — the one args asks for.
+// With args nil the name must be unique: none is ErrNotFound and more than
+// one is ErrAmbiguous, naming each overload's Signature. With args non-nil
+// (empty for no arguments) it is the one whose ArgumentTypes equal args,
+// ErrNotFound if none. The error has no "pgmo: " prefix and no name; the
+// caller wraps it with both.
+func pickOverload[T any](found []T, id func(T) *RoutineIdentity, args []OID, kind string) (T, error) {
+	var zero T
 	if args != nil {
-		found = slices.DeleteFunc(found, func(r *RoutineIdentity) bool { return !r.SameArguments(args) })
+		found = slices.DeleteFunc(found, func(r T) bool { return !id(r).SameArguments(args) })
 	}
 	switch len(found) {
 	case 0:
 		if args != nil {
-			return nil, notFoundf("routine %s with argument types %v: no such routine", qualified, args)
+			return zero, notFoundf("no %s with argument types %v", kind, args)
 		}
-		return nil, notFoundf("routine %s: no such routine", qualified)
+		return zero, notFoundf("no such %s", kind)
 	case 1:
 		return found[0], nil
 	}
 	sigs := make([]string, len(found))
 	for i, r := range found {
-		sigs[i] = r.Signature()
+		sigs[i] = id(r).Signature()
 	}
-	return nil, ambiguousf("routine %s: %d overloads (%s); name the argument types", qualified, len(found), strings.Join(sigs, "; "))
+	return zero, ambiguousf("%d overloads (%s); name the argument types", len(found), strings.Join(sigs, "; "))
 }

@@ -64,8 +64,8 @@ checks every rendering against `catalogGates`, the select-list arity across
 releases, and that every gate call site has a golden query. A new gated read
 adds its builder to `goldenQueries` in the same change. Each guard has a
 fixture self-test as well. The gated reads are `databaseSelect`
-(`testdata/version_gates/database.sql`, P4.1) and `roleSelect`
-(`role.sql`, P4.2). The inventory check reads `true`/`false` as the boolean
+(`testdata/version_gates/database.sql`, P4.1), `roleSelect`
+(`role.sql`, P4.2) and `constraintsQuery` (`constraint.sql`, P4.4). The inventory check reads `true`/`false` as the boolean
 literals they are, not as column references (`boolLiteral`).
 
 ## Architecture
@@ -429,12 +429,15 @@ the routine families embed `RoutineIdentity`:
 through `format_type`, which leaves a type unqualified when the session's
 `search_path` finds it (`x ty` under `idt, public`, `x idt.ty` under
 `public`; checked on pg15 and pg18). Written into DDL and run under another
-path, that names a different type or none. So `routineIdentityColumns` builds
-the type names itself: a `pg_catalog` type is `format_type`'s name (`double
-precision`, `"char"`, `text[]`); any other is `quote_ident(schema).quote_ident(name)`,
-and an array of one (`typelem` whose `typarray` is the type, as `format_type`
-tests) the element's name with `[]`. `proargtypes` has no typmods, so nothing
-is lost.
+path, that names a different type or none. So pgmo builds the type names
+itself (`typeName`/`typeJoins`, shared with the routine families): a
+`pg_catalog` type is `format_type`'s name (`double precision`, `"char"`,
+`text[]`); any other is `quote_ident(schema).quote_ident(name)`, and an array
+of one (`typelem` whose `typarray` is the type, as `format_type` tests) the
+element's name with `[]`. `proargtypes` has no typmods, so nothing is lost.
+The type is joined, never looked up by a scalar subquery per type (§
+Routines: the planner's estimate of the subquery form crosses
+`jit_above_cost`).
 
 `Signature()` is accepted after `ROUTINE` (`DROP`/`COMMENT ON`/`ALTER`/`GRANT
 … ON ROUTINE`) for every kind, and after the kind's own keyword for every
@@ -443,8 +446,9 @@ routine but a zero-argument aggregate, which `AGGREGATE` writes `ag(*)`
 (`os(double precision, anyelement)`) is accepted by `AGGREGATE` and `ROUTINE`
 alike. Checked on pg15–pg18.
 
-`routineByName(ctx, q, schema, name, args)` is the lookup the routine
-families build on: an empty schema is `ErrSchemaRequired` before anything is
+`routineByName(ctx, q, schema, name, args)` — exported as
+`Database.RoutineByName`, the lookup of any kind — reads the identity alone;
+the families' by-name reads share its overload rule (`pickOverload`): an empty schema is `ErrSchemaRequired` before anything is
 sent; names match exactly; with `args` nil a name with several overloads is
 `ErrAmbiguous` (`ambiguousf`) naming each `Signature`, and with `args`
 non-nil (empty for none) only the overload whose `ArgumentTypes` equal them
@@ -1124,6 +1128,226 @@ extension schema, `public`, `System` and `ExtensionMember`, and the listing
 read again as a plain role, identical. The sweep reads `app` (ACL, IN
 SCHEMA entry, comment), `public` and the database's entries.
 
+### Tables (`table.go`, `table_column.go`, `table_constraint.go`, `index.go`, `trigger.go`, `policy.go`)
+
+Landed P4.4 (reads; the writes are P4.13.3). gosmo's lean `Table` plus
+reads of its parts: `Database.Tables(ctx, ObjectFilter)`,
+`Database.TableByName(ctx, schema, name)` (exact; an empty schema is
+`ErrSchemaRequired`, never resolved through `search_path`; a view or
+sequence of that name is `ErrNotFound`), `Database.TableRef(schema, name)`
+(lookup-free, names only), `Table.Database()`, `QualifiedName()`. A table is
+a `pg_class` row of kind `r` or `p` — partitions included — read through
+**`s.onDatabase`**, one statement with the ACL as an `aclLateral`.
+
+| Field | Source |
+|---|---|
+| `Origin` | `originColumns` over `pg_class`: temporary tables (`pg_temp_N`) are `IsSystem` |
+| `OID`, `Schema`, `Name`, `Owner` | `oid`, `nspname`, `relname`, `pg_get_userbyid(relowner)` |
+| `Kind` | `relkind` as `RelationKind` (every code, `String()` as psql names it; reused by P4.5/P4.12) |
+| `Persistence` | `relpersistence`: permanent, `UNLOGGED`, `TEMPORARY` |
+| `IsPartition`, `PartitionKey`, `PartitionBound` | `relispartition`, `pg_get_partkeydef(oid)`, `pg_get_expr(relpartbound, oid)` (`"DEFAULT"`: `IsDefaultPartition()`) |
+| `Parents` | `pg_inherits` by `inhseqno`, as `[]ObjectName{Schema, Name}` |
+| `Tablespace` | `spcname` of `reltablespace`, empty for the database's default |
+| `Options` | `reloptions`, then the TOAST table's prefixed `toast.`, as `ParameterSetting`s |
+| `RowSecurity`, `ForceRowSecurity` | `relrowsecurity`, `relforcerowsecurity` |
+| `RowEstimate` | `reltuples::bigint`; -1 never vacuumed or analyzed |
+| `Privileges`, `PrivilegesDefault` | `aclexplode(COALESCE(relacl, acldefault('r', relowner)))`, `relacl IS NULL` |
+| `Comment` | `obj_description(oid, 'pg_class')` |
+
+The parts are read on demand, one statement each keyed by the OID bound as
+`$1`; a `TableRef` (OID 0) is refused with `ErrHandleNotLoaded` before
+anything is sent — as gosmo's `requireLoaded`, so an empty list always means
+none:
+
+| Read | Catalog | Notes |
+|---|---|---|
+| `Columns` → `[]*Column` | `pg_attribute` (`attnum > 0`, not dropped) + `pg_attrdef`, `pg_type`, `pg_collation`, `attacl` | `Type` is `format_type(atttypid, atttypmod)` for a `pg_catalog` type and schema-qualified otherwise (the element's schema for an array), whatever the path; `Default` vs `GenerationExpression` split on `attgenerated` (`v`, virtual, 18+); `Collation` only when not the type's own (psql's rule); `StatisticsTarget` `COALESCE(attstattarget, -1)` — the column is `int4` on 15–16 and a nullable `int2` from 17, the same read on both; `IsLocal`/`InheritCount`; the column ACL with no default (NULL is none) |
+| `Constraints` → `[]*Constraint` | `pg_constraint` (`contype <> 't'`) | `pg_get_constraintdef`; `conkey`/`confkey` named in key order; `Enforced` is `conenforced` from 18 and `true` before (`colSince`, golden `constraint.sql`); 18's NOT NULL rows (`contype 'n'`) are listed; `Index` for `p`/`u`/`x`; FK actions and match type as `ForeignKeyAction`/`ForeignKeyMatch`, empty for other kinds |
+| `Indexes` → `[]*Index` | `pg_index` + `pg_class`, `pg_am`, `pg_constraint`, `pg_tablespace` | `pg_get_indexdef` (table always qualified); `KeyColumns`/`IncludedColumns` per column from `pg_get_indexdef(oid, k, true)` over `indnkeyatts`/`indnatts`; `Predicate`; `Valid`; `NullsNotDistinct` (15); `Constraint` it enforces |
+| `Triggers` → `[]*Trigger` | `pg_trigger` (`NOT tgisinternal`) + `pg_proc` | `pg_get_triggerdef(oid)` (non-pretty: table qualified); `tgtype` decoded into `Timing`, `Events` (server order), `ForEachRow`; `UpdateColumns` from `tgattr`; `Enabled` (`O`/`R`/`A`/`D`); constraint-trigger flags; `Inherited` = `tgparentid <> 0` |
+| `Policies` → `[]*Policy` | `pg_policy` | `Command`, `Permissive`, `Roles` in stored order (PUBLIC `""`), `Using`/`WithCheck` |
+| `Children` → `[]ChildTable` | `pg_inherits` (`inhparent = oid`) | direct only; `Kind` may be a foreign table; `PartitionBound`, `DetachPending` |
+| `Size` → `TableSize` | `pg_table_size`, `pg_indexes_size`, `pg_total_relation_size` | on demand (stats files); any role may call them; 0 for a partitioned table; a dropped table is `ErrNotFound` |
+
+**Rendered text follows the session's `search_path`.** `pg_get_expr`,
+`pg_get_constraintdef`, `pg_get_triggerdef` and the expressions inside
+`pg_get_indexdef` leave a name visible on the path unqualified
+(`nextval('s'::regclass)` vs `nextval('app.s'::regclass)` — checked on pg15
+and pg18), as psql's `\d` shows. pgmo does not set the caller's path; the
+structured fields (`Column.Type`, `Collation`, `Constraint.ReferencedTable`,
+`Trigger.Function`, `Parents`) are qualified whatever it is. The P5
+scripter must render under a fixed path (`OPEN-THREADS.md` § Tables).
+
+An `ObjectFilter`'s `Name` matches `relname`, `Schema` `nspname`, `System`
+the system-schema rule, `ExtensionMember` the table's own membership. Order
+is schema then name, byte order (`name` columns).
+
+Tests: `table_test.go` (pgmotest: every field of each type from its own
+column, with a field-count guard per type; routed to the table's database,
+names bound as `$1`/`$2`, parts keyed by the OID; the filter's exact tail;
+`ErrSchemaRequired` and every part's `ErrHandleNotLoaded` before anything
+is sent; not found, server errors and short arrays wrapped once;
+`conenforced` by version; `tgtype` decoding; each code's `String`).
+Thirty mutations: twenty-one caught offline, seven only live (the collation and type-qualification rules, the partial-index predicate's pretty form, `tgparentid`, the policy role order, `inhparent`, `pg_total_relation_size`), and the parents' order once the fixture's two parents were in different schemas; one equivalent — joining an array's element type for its schema — and that join was removed, since an array type is always in its element's schema. Live, `TestLiveTables` on pg15–pg18: identity, an
+extension's type, defaults, stored (and on 18 virtual) generated columns,
+an enum array, `COLLATE "C"` with `EXTERNAL` storage and a statistics
+target, a column grant and comment, a sequence default, a domain; a
+`NOT VALID` check (and on 18 a `NOT ENFORCED` one and the NOT NULL rows); a
+deferrable `MATCH FULL` foreign key with actions, an exclusion constraint,
+storage parameters on a table and its TOAST table, a partial expression
+index with `INCLUDE` and a fillfactor, an `ENABLE REPLICA` trigger on
+`UPDATE OF` with `WHEN`, a deferrable constraint trigger (and no foreign-key
+trigger), forced RLS with a restrictive and a permissive policy; range
+partitions with a DEFAULT, a partitioned index and an inherited trigger;
+two-parent inheritance with an inherited check; an unlogged extension
+member; case-only names; a temporary table; every `TableRef` read refused;
+and the listing with every part read again as a plain role, identical.
+
+### Views and materialized views (`view.go`)
+
+Landed P4.5 (reads; the writes are P4.13.3). Two types, as CREATE VIEW and
+CREATE MATERIALIZED VIEW are two statements and pgMS shows two folders:
+`Database.Views` / `ViewByName` / `ViewRef` (`pg_class` kind `v`) and
+`Database.MaterializedViews` / `MaterializedViewByName` /
+`MaterializedViewRef` (kind `m`), each with `Database()` and
+`QualifiedName()`. Through **`s.onDatabase`**, one statement each, the ACL
+an `aclLateral` (`acldefault('r', …)`: a view takes a table's privileges).
+Each by-name read finds its own kind alone — a table, view or materialized
+view of the name is `ErrNotFound` to the others — and an empty schema is
+`ErrSchemaRequired`. The listings take `relationFilterColumns`, the
+tables' filter (renamed from `tableFilterColumns`).
+
+| Field | View | MaterializedView | Source |
+|---|---|---|---|
+| `Origin`, `OID`, `Schema`, `Name`, `Owner` | ✓ | ✓ | as `Table`; `information_schema`'s views are `IsSystem` |
+| `Definition` | ✓ | ✓ | `pg_get_viewdef(oid)`, non-pretty as `pg_dump`: leading space to closing `;` |
+| `CheckOption` | ✓ | | `check_option` from `pg_options_to_table(reloptions)`: `""`, `local`, `cascaded` (`ViewCheckOption`, `String()` NONE/LOCAL/CASCADED) |
+| `SecurityBarrier`, `SecurityInvoker` | ✓ | | the parameter cast `::boolean` server-side, so `on`, `1`, `true` agree; `false` when unset |
+| `Options` | ✓ | ✓ | `reloptions` as stored (a view's includes the three above); a materialized view's then its TOAST table's, `toast.`-prefixed (`relationOptions`) |
+| `Populated` | | ✓ | `relispopulated`: false after `WITH NO DATA` |
+| `Tablespace`, `RowEstimate` | | ✓ | as `Table` |
+| `Privileges`, `PrivilegesDefault`, `Comment` | ✓ | ✓ | as `Table` |
+
+Parts, on demand and keyed by the OID with the tables' own queries — a Ref
+is `ErrHandleNotLoaded` before anything is sent: `View.Columns` and
+`MaterializedView.Columns` (`columnsQuery`; a view's column may carry a
+`DEFAULT`, grants and a comment, its `Storage` is its type's and means
+nothing), `MaterializedView.Indexes` (`indexesQuery`) and
+`MaterializedView.Size` (`tableSizeQuery`, a `TableSize`).
+
+**The definition follows the session's `search_path`** as every rendered
+expression (§ Tables): `FROM app.t` reads `FROM t` once `app` is on the
+path — checked on pg15 and pg18, and pinned by the live test.
+
+Tests: `view_test.go` (pgmotest: every field of both types from its own
+column with a field-count guard; names bound as `$1`/`$2`, routed to the
+view's database; each option's exact fragment; both filters' exact tail;
+`ErrSchemaRequired`, not found, server errors and a short ACL wrapped once;
+every Ref part refused before sending; parts keyed by the OID; a dropped
+materialized view's size `ErrNotFound`; `ViewCheckOption.String`). Live,
+`TestLiveViews` on pg15–pg18: both security parameters written as `on`
+and `1` with a cascaded check option, a local check option over a view, a
+column default, grants to PUBLIC and on a column, comments, a case-only
+name, an extension member with an extension's type, `information_schema`
+as system; a materialized view `WITH NO DATA` with its own and its TOAST
+table's parameters, and a populated, analyzed one with a unique index; the
+definition under two paths; each by-name read refusing the other kinds;
+every Ref refused; and both listings with their parts read again as a
+plain role, identical.
+
+### Routines: functions, procedures, aggregates (`routine.go`)
+
+Landed P4.6 (reads; the writes are P4.13.3). Three types, as CREATE
+FUNCTION, CREATE PROCEDURE and CREATE AGGREGATE are three statements with
+different clauses and pgMS shows three folders: `Database.Functions` /
+`FunctionByName` / `FunctionRef` (`prokind` `f` and `w`),
+`Database.Procedures` / `ProcedureByName` / `ProcedureRef` (`p`) and
+`Database.Aggregates` / `AggregateByName` / `AggregateRef` (`a`, with its
+`pg_aggregate` row), each embedding `Origin` and `RoutineIdentity` (§
+Identity) and with `Database()`. `Database.RoutineByName` reads the
+identity of any kind. Through **`s.onDatabase`**, one statement each; the
+ACL an `aclLateral` over `acldefault('f', …)` (EXECUTE to PUBLIC and the
+owner when never set).
+
+By-name reads take `args []OID` and pick an overload by `pickOverload`, as
+`routineByName`: nil → the name must be unique in the family (`ErrNotFound`
+/ `ErrAmbiguous` naming each `Signature`), non-nil (empty for none) → the
+exact input types. A routine of another family of the name is
+`ErrNotFound`; an empty schema `ErrSchemaRequired`. A Ref takes the argument
+type *names* as DDL writes them (`FunctionRef(schema, name,
+[]string{"integer"})`) — it is for writes, and `Signature` writes them as
+given.
+
+| Field | Function | Procedure | Aggregate | Source |
+|---|---|---|---|---|
+| `Origin`, `RoutineIdentity`, `Owner` | ✓ | ✓ | ✓ | `ArgumentTypeNames` are the input `Arguments`' `Type`s, checked against `proargtypes` |
+| `Language` | ✓ | ✓ | | `pg_language.lanname` |
+| `Arguments []RoutineArgument` | ✓ | ✓ | ✓ | every argument: `Mode` (`proargmodes`, NULL → IN; `IsInput()`), `Name`, `TypeOID`, `Type` (`typeName`), `Default` (`pg_get_function_arg_default`) |
+| `ReturnType`, `Result` | ✓ | | ✓ | `typeName(prorettype)`; `pg_get_function_result` (display) |
+| `ReturnsSet` | ✓ | | | `proretset` (SETOF, TABLE) |
+| `Volatility`, `Strict`, `Leakproof`, `Cost`, `Rows`, `SupportFunction` | ✓ | | | `provolatile`, `proisstrict`, `proleakproof`, `procost`, `prorows`, `prosupport` |
+| `Parallel` | ✓ | | ✓ | `proparallel` (`ParallelSafety`) |
+| `SecurityDefiner`, `Settings` | ✓ | ✓ | | `prosecdef`; `proconfig` as `ParameterSetting`s (`search_path=app, pg_temp`) |
+| `ObjectFile`, `SQLStandardBody` | ✓ | ✓ | | `probin` (a C routine's library); `prosqlbody IS NOT NULL` (BEGIN ATOMIC / RETURN) |
+| `AggregateKind`, `DirectArguments` | | | ✓ | `aggkind` (normal, ordered-set, hypothetical-set), `aggnumdirectargs` |
+| transition / final / combine / serial / deserial / moving functions, state types and spaces, final extra / modify, initial conditions | | | ✓ | `pg_aggregate`; functions as `ObjectName`, zero for none; `InitialCondition` + `HasInitialCondition` (an empty one is not none) |
+| `SortOperator` | | | ✓ | `OPERATOR(schema.op)`, the form `SORTOP` takes whatever the path |
+| `Privileges`, `PrivilegesDefault`, `Comment` | ✓ | ✓ | ✓ | `proacl`; `pg_description` |
+
+**Bodies are on demand**: `Function.Body` / `Procedure.Body` → a
+`RoutineBody{Source, Definition}` (`prosrc`; `pg_get_functiondef`, whose C
+form ends `AS 'obj', 'sym'`), keyed by OID and the family's kinds, a Ref
+`ErrHandleNotLoaded`, a dropped routine `ErrNotFound`. A listing of pg15's
+own 3,106 functions carries 577 KB of definitions; a database of PL/pgSQL
+many times that. An aggregate has no body (`pg_get_functiondef` refuses
+one); the P5 scripter writes `CREATE AGGREGATE` from the fields.
+
+**No subquery per row.** The first form — a `LATERAL` per routine for its
+arguments, a scalar subquery per type name, `obj_description`, the
+extension subquery of `originColumns` — listed pg_catalog's functions in
+5 s on pg15 and pg18: the planner estimates ten rows per `unnest` and an
+index scan per subquery, the total (1.3 M) crosses `jit_above_cost`
+(100 000), and 4 s of it was JIT compilation (1 s with `jit = off`). So:
+types are joined (`typeJoins`), the arguments are one grouped read of every
+routine of the family's kinds joined by OID (`routineArguments`; a by-name
+read narrows it to the name, `$2`), the comment joins `pg_description`, the
+extension joins through `originJoin`/`originJoinColumns` (the same
+membership condition as `originColumns`), the aggregate's functions,
+types and sort operator are joined (`procedureJoin`). Estimated 7.8 k, the
+full listing runs in 0.2–0.35 s, a by-name read in ~20 ms (an aggregate's
+~60 ms, most of it planning its thirty-odd joins). A family whose listing
+can be as long should do the same.
+
+**Rendered text follows the session's `search_path`**, as every expression
+(§ Tables): `Result`, `IdentityArguments`, a `Default` (`'{a}'::mood[]`
+for `app.mood[]` with `app` on the path) and `Body`'s definition. The
+structured names — `Arguments[].Type`, `ReturnType`, `ArgumentTypeNames`,
+the aggregate's functions, types and operator — are qualified whatever it
+is; pinned by the live test.
+
+Tests: `routine_test.go` (pgmotest: every field of the three types from its
+own column with field-count guards; the identity's names derived from the
+inputs; names bound as `$1`/`$2`, the argument read narrowed to `$2`,
+routed to the database; each family's join fragments; the three filters'
+exact tail, the argument read's kinds; overloads ambiguous, picked and
+missed; `ErrSchemaRequired`, not found, server errors wrapped once;
+malformed ACL and argument arrays, inputs that are not `proargtypes`; Refs
+and `Body` refused before sending; `Body` keyed by OID and kinds, dropped
+`ErrNotFound`; `RoutineByName` on the database's pool; every code's
+`String`). Live, `TestLiveRoutines` on pg15–pg18: overloads with
+`DEFAULT`, `VARIADIC`, `OUT`, `RETURNS TABLE`, an odd-named composite and
+an enum array; STABLE STRICT LEAKPROOF; IMMUTABLE SECURITY DEFINER PARALLEL
+SAFE COST ROWS with `SET search_path`; a SQL-standard body; `SUPPORT`; a
+grant `WITH GRANT OPTION` and a revoke from PUBLIC; a case-only name;
+citext's C function and pg_catalog's `row_number` (window); a PL/pgSQL and
+a BEGIN ATOMIC procedure; `ag(*)`, a moving aggregate with every function,
+a `SORTOP` one, an ordered-set one and pg_catalog's hypothetical `rank`;
+each by-name read refusing the other families; structured vs rendered names
+under a path finding the types; a `Signature` replayed in `COMMENT ON`;
+**every routine of the database** (pg_catalog's included) listed with the
+identity `routineIdentityColumns` reads for it; and the listings with their
+bodies read again as a plain role, identical.
+
 ### Version sweep (`live_versionsweep_test.go`)
 
 gosmo's `TestLiveVersionSweep`, landed P3.8: call every read pgmo sends
@@ -1189,6 +1413,20 @@ database and in the scratch one, and a comment; `sweepRoles` drives the
 listing narrowed to plain, the by-name read of it (asserting each) and of
 `pg_monitor` (predefined, three grants). Result: 27 calls per role, 0
 failed, on pg15–pg18.
+
+`Table` is a swept type (P4.4): `app.child`, read by name, is swept
+reflectively (each part read and `Size`), and `sweepTables` drives the
+listing narrowed to `app`, the by-name read of `app.parent` (comment,
+`ANALYZE`d estimate, never-set ACL) and each part read on the fixture table
+that has one — `app.parent`'s columns and size, `app.child`'s constraints,
+index, trigger and policy, `app.part`'s partition. Result: 50 calls per
+role, 0 failed, on pg15–pg18.
+
+`View` and `MaterializedView` are swept types (P4.5): `app.parent_names`
+(made `security_barrier`) and `app.parent_totals` (given a unique index),
+read by name, are swept reflectively, and `sweepViews` drives both listings
+narrowed to `app`, both by-name reads and each part read, asserting their
+rows. Result: 64 calls per role, 0 failed, on pg15–pg18.
 
 ## Feature map
 

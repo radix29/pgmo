@@ -79,6 +79,11 @@ var bareRefusalsAllowed = map[string][]string{
 	// An ACL's or default-privilege read's parallel arrays that do not line
 	// up: likewise the server's answer, malformed.
 	"privileges.go": {"privilege arrays of different lengths"},
+	// A table row's parent schema and name arrays that do not line up.
+	"table.go": {"name arrays of different lengths"},
+	// A routine row whose argument arrays do not line up, or whose input
+	// arguments are not its proargtypes.
+	"routine.go": {"argument arrays of different lengths", "argument types "},
 }
 
 // A call refused for its own arguments wraps ErrInvalidRequest, so a caller
