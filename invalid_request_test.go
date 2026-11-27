@@ -90,6 +90,8 @@ var bareRefusalsAllowed = map[string][]string{
 	"domain.go": {"constraint arrays of different lengths"},
 	// An extension row's configuration table arrays that do not line up.
 	"extension.go": {"configuration arrays of different lengths"},
+	// A text search configuration row's mapping arrays that do not line up.
+	"text_search.go": {"mapping arrays of different lengths"},
 }
 
 // A call refused for its own arguments wraps ErrInvalidRequest, so a caller

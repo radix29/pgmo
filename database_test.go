@@ -194,7 +194,7 @@ func TestDatabaseIsInvalid(t *testing.T) {
 func TestLocaleProviderString(t *testing.T) {
 	for p, want := range map[pgmo.LocaleProvider]string{
 		pgmo.LocaleProviderLibc: "libc", pgmo.LocaleProviderICU: "icu", pgmo.LocaleProviderBuiltin: "builtin",
-		"d": `LocaleProvider("d")`,
+		pgmo.LocaleProviderDefault: "default", "x": `LocaleProvider("x")`,
 	} {
 		if got := p.String(); got != want {
 			t.Errorf("%q.String() = %q, want %q", string(p), got, want)

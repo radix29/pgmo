@@ -62,7 +62,13 @@ Module `github.com/radix29/pgmo`, MIT.
   `EventTriggerByName`, `EventTriggerRef` in `event_trigger.go`; the
   extension reads `Extensions`, `ExtensionByName`, `ExtensionRef`,
   `Extension.Members`, `AvailableExtensions`, `AvailableExtensionByName`
-  in `extension.go`).
+  in `extension.go`; P4.11's reads — `Tablespaces`, `TablespaceByName`,
+  `TablespaceRef`, `Tablespace.Size` in `tablespace.go`; `Collations`,
+  `CollationByName`, `CollationRef` in `collation.go`; the text search
+  parsers, templates, dictionaries and configurations in
+  `text_search.go`; `Languages`, `LanguageByName`, `LanguageRef` in
+  `language.go`; `Casts`, `CastByTypes`, `CastRef` in `cast.go`;
+  `Operators`, `OperatorByName`, `OperatorRef` in `operator.go`).
   The plan for pgmo *and* pgMS is
   `~/go/pgms/docs/PLAN.md` (`docs/PLAN.md` here points to it); pgmo owns
   phases P1–P6 and shares P14–P16.

@@ -34,10 +34,15 @@ const (
 	LocaleProviderLibc    LocaleProvider = "c" // the C library's locales
 	LocaleProviderICU     LocaleProvider = "i" // ICU
 	LocaleProviderBuiltin LocaleProvider = "b" // PostgreSQL's own, from 17
+
+	// LocaleProviderDefault is a collation's alone: the "default" collation,
+	// which stands for the database's own provider and locale.
+	LocaleProviderDefault LocaleProvider = "d"
 )
 
 // String names the provider as CREATE DATABASE's LOCALE_PROVIDER spells it:
-// libc, icu, builtin; an unknown code reads LocaleProvider("x").
+// libc, icu, builtin (and a collation's default); an unknown code reads
+// LocaleProvider("x").
 func (p LocaleProvider) String() string {
 	switch p {
 	case LocaleProviderLibc:
@@ -46,6 +51,8 @@ func (p LocaleProvider) String() string {
 		return "icu"
 	case LocaleProviderBuiltin:
 		return "builtin"
+	case LocaleProviderDefault:
+		return "default"
 	}
 	return fmt.Sprintf("LocaleProvider(%q)", string(p))
 }

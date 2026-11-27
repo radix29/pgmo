@@ -108,3 +108,40 @@ func (a *AvailableExtension) SetDatabase(d *Database) { a.db = d }
 // CompareExtensionVersions is compareExtensionVersions, for the external
 // tests.
 var CompareExtensionVersions = compareExtensionVersions
+
+// SetServer replaces the Tablespace's back-pointer, so a test can compare
+// the catalog fields of two Tablespaces with reflect.DeepEqual.
+func (t *Tablespace) SetServer(s *Server) { t.server = s }
+
+// SetDatabase replaces the Collation's back-pointer, so a test can compare
+// the catalog fields of two Collations with reflect.DeepEqual.
+func (c *Collation) SetDatabase(d *Database) { c.db = d }
+
+// SetDatabase replaces the TextSearchParser's back-pointer, so a test can
+// compare the catalog fields of two parsers with reflect.DeepEqual.
+func (p *TextSearchParser) SetDatabase(d *Database) { p.db = d }
+
+// SetDatabase replaces the TextSearchTemplate's back-pointer, so a test can
+// compare the catalog fields of two templates with reflect.DeepEqual.
+func (t *TextSearchTemplate) SetDatabase(d *Database) { t.db = d }
+
+// SetDatabase replaces the TextSearchDictionary's back-pointer, so a test
+// can compare the catalog fields of two dictionaries with reflect.DeepEqual.
+func (dc *TextSearchDictionary) SetDatabase(d *Database) { dc.db = d }
+
+// SetDatabase replaces the TextSearchConfiguration's back-pointer, so a
+// test can compare the catalog fields of two configurations with
+// reflect.DeepEqual.
+func (c *TextSearchConfiguration) SetDatabase(d *Database) { c.db = d }
+
+// SetDatabase replaces the Language's back-pointer, so a test can compare
+// the catalog fields of two Languages with reflect.DeepEqual.
+func (l *Language) SetDatabase(d *Database) { l.db = d }
+
+// SetDatabase replaces the Cast's back-pointer, so a test can compare the
+// catalog fields of two Casts with reflect.DeepEqual.
+func (c *Cast) SetDatabase(d *Database) { c.db = d }
+
+// SetDatabase replaces the Operator's back-pointer, so a test can compare
+// the catalog fields of two Operators with reflect.DeepEqual.
+func (o *Operator) SetDatabase(d *Database) { o.db = d }

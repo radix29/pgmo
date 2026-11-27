@@ -65,7 +65,8 @@ releases, and that every gate call site has a golden query. A new gated read
 adds its builder to `goldenQueries` in the same change. Each guard has a
 fixture self-test as well. The gated reads are `databaseSelect`
 (`testdata/version_gates/database.sql`, P4.1), `roleSelect`
-(`role.sql`, P4.2) and `constraintsQuery` (`constraint.sql`, P4.4). The inventory check reads `true`/`false` as the boolean
+(`role.sql`, P4.2), `constraintsQuery` (`constraint.sql`, P4.4) and
+`collationSelect` (`collation.sql`, P4.11). The inventory check reads `true`/`false` as the boolean
 literals they are, not as column references (`boolLiteral`).
 
 ## Architecture
@@ -1567,6 +1568,94 @@ mutations: 29 caught (all offline; grouping by name only after the
 fixture gave two neighbours one comment), 1 equivalent (an empty
 `Requires` set to nil: `array_agg` never gives one; removed).
 
+### Tablespaces, collations, text search, languages, casts, operators
+
+Landed P4.11 (reads only: of these, P4.13.3 writes tablespaces alone; the
+rest are scripted by P5 from what is read here). Six families, nine types,
+each as the earlier families: a listing taking an `ObjectFilter` pushed
+into its query, an exact by-name read (`ErrNotFound`), a lookup-free
+`Ref`, `Origin` on every type, every row the same for every role (none of
+these catalogs hides a row, and none but tablespaces and languages has an
+ACL). Each listing joins rather than subquerying per row; the costliest,
+pg_catalog's ~800 operators, is planned at ~890 on pg15 and pg18, far
+below `jit_above_cost`.
+
+- **Tablespaces** (`tablespace.go`): `Server.Tablespaces`,
+  `TablespaceByName`, `TablespaceRef`, and `Tablespace.Size(ctx)` on
+  demand (`pg_tablespace_size`, keyed on the name, so it works on a Ref).
+  A shared catalog, read through the Server's own connection as databases
+  and roles are. `IsSystem` is `oid < 16384` (pg_default, pg_global);
+  never an extension member, so `ExtensionMember: true` is `AND false`.
+  `Size` is answered to a role holding CREATE on the tablespace or
+  `pg_read_all_stats`, and to any role for its session's database's
+  default tablespace; otherwise 42501.
+- **Collations** (`collation.go`): `Database.Collations`,
+  `CollationByName(ctx, schema, name)`, `CollationRef`. The catalog may
+  hold one name per encoding (`pg_import_system_collations` imports a
+  locale's alias for each encoding it supports); the listing returns them
+  all, ordered by encoding, and the by-name read the one the database can
+  use — its encoding's before any-encoding's (`collencoding -1`), as the
+  server resolves a name. Gated: `colliculocale` → `colllocale` (17),
+  `collicurules` (16; golden file `testdata/version_gates/collation.sql`).
+  `LocaleProviderDefault` (`'d'`) is the `default` collation's alone.
+- **Text search** (`text_search.go`): four families sharing
+  `listTextSearch`/`textSearchByName` — `TextSearchParsers`,
+  `TextSearchTemplates` (neither has an owner: a superuser's C
+  functions), `TextSearchDictionaries`, `TextSearchConfigurations`, each
+  with `…ByName(ctx, schema, name)` and `…Ref`. A configuration's
+  `Mappings` are read in the same statement: `pg_ts_config_map` aggregated
+  per configuration by token type then position, the aliases from
+  `ts_token_type` called once per *parser* (a derived table, not a lateral
+  per configuration), grouped by token type in Go. A dictionary's
+  `Options` is `dictinitoption` verbatim.
+- **Languages** (`language.go`): `Database.Languages`, `LanguageByName`,
+  `LanguageRef`. Schema-less; `IsSystem` is `oid < 16384` — internal, c,
+  sql and plpgsql (the last also an extension member). ACL USAGE, default
+  `acldefault('l', owner)`.
+- **Casts** (`cast.go`): `Database.Casts`, `CastByTypes(ctx, source,
+  target OID)`, `CastRef(source, target string)`, `Cast.Signature()` →
+  `(source AS target)`. A cast has no name, schema or owner: the filter's
+  Name and Schema criteria are ignored, System is `oid < 16384`.
+  `Source`/`Target` are `typeName` (§ Identity): qualified outside
+  pg_catalog whatever the `search_path`. **`CREATE TYPE … AS RANGE` makes
+  a cast of its own** — range to multirange, explicit, by the multirange's
+  constructor, `pg_depend` deptype `'i'` on both types — so every user
+  range brings a user cast (found on the lab, pinned by the sweep).
+- **Operators** (`operator.go`): `Database.Operators`,
+  `OperatorByName(ctx, schema, name, left, right OID)` (left 0 for a
+  prefix operator — the catalog's unique key), `OperatorRef(schema, name,
+  left, right string)`. `QualifiedName()` quotes the schema and not the
+  name (an operator name is no identifier); `Signature()` is `schema.op
+  (left, right)`, `NONE` for a prefix operator's left. A shell operator (a
+  COMMUTATOR/NEGATOR named before its definition) has no function and
+  result type 0.
+
+| Type | Catalog | Notes |
+|---|---|---|
+| `Tablespace` | `pg_tablespace` + `pg_tablespace_location`, `pg_shdescription` | `Location` empty for pg_default/pg_global, `pg_tblspc/<oid>` for an in-place one; `Options` from `spcoptions`; ACL CREATE, default `acldefault('t', owner)` |
+| `Collation` | `pg_collation` | `Encoding` empty for any (`-1`); `Collate`/`CType` libc's, `Locale` ICU's and builtin's |
+| `TextSearchParser`, `TextSearchTemplate` | `pg_ts_parser`, `pg_ts_template` | functions as `ObjectName`s, zero for an optional one unset |
+| `TextSearchDictionary`, `TextSearchConfiguration` | `pg_ts_dict`, `pg_ts_config` + `pg_ts_config_map` | `Template`, `Parser` as `ObjectName`s |
+| `Language` | `pg_language` | handler, inline, validator as `ObjectName`s |
+| `Cast` | `pg_cast` | `Context` (`e`/`a`/`i`), `Method` (`f`/`i`/`b`) as the catalog's letters |
+| `Operator` | `pg_operator` | operand and result types as OIDs and `typeName` text; commutator and negator as `ObjectName`s |
+
+Tests: one offline file per source file (pgmotest: every field of two
+rows with field-count guards; each join's fragment; the filter tail; the
+by-name binding; not found and server errors wrapped once; the Ref; for
+text search one table over the four families and misaligned mapping
+arrays refused). Live on pg15–pg18: `TestLiveTablespaces` (an in-place
+tablespace via `allow_in_place_tablespaces`, options, comment, a grant and
+a table; the listing matched to `pg_tablespace`; a plain role's listing
+identical, `pg_global`'s and the new one's size refused it, the grantee's
+answered) and, over one fixture database (`live_catalog_objects_test.go`),
+`TestLiveCollations`, `TestLiveTextSearch` (every configuration's mappings
+matched to `pg_ts_config_map` × `ts_token_type`), `TestLiveLanguages`,
+`TestLiveCasts`, `TestLiveOperators` (every operator's `Signature`
+matched to `regoperator`) — each listing matched to its catalog, and
+identical as a plain role and under a `search_path` holding the fixture's
+schema. 32 mutations, all caught offline.
+
 ### Routines: functions, procedures, aggregates (`routine.go`)
 
 Landed P4.6 (reads; the writes are P4.13.3). Three types, as CREATE
@@ -1674,7 +1763,9 @@ It creates a throwaway database holding one of each object kind the families
 read (`sweepSchema`: tables with keys, an index, partitions, a view, a
 materialized view, a foreign table, a sequence, enum/composite/domain types, a
 collation, overloaded functions, a procedure, an aggregate, a trigger, a
-statistics object, a policy, a publication, a rule, an extension) — a read
+statistics object, a policy, a publication, a rule, an extension; from
+P4.11 a text search parser, template, dictionary and configuration, a
+language, a cast and two operators, one with a shell negator) — a read
 finding nothing can succeed on a version its query cannot run on — and sweeps
 it twice: as the connected role, and as a plain `NOLOGIN` role with no
 privileges, each call then its own transaction opened by `SET LOCAL ROLE`, so

@@ -81,6 +81,15 @@ const (
 	catalogNamespace catalogTable = "pg_catalog.pg_namespace" // schemas
 
 	catalogEventTrigger catalogTable = "pg_catalog.pg_event_trigger" // event triggers
+
+	catalogCollation  catalogTable = "pg_catalog.pg_collation"   // collations
+	catalogLanguage   catalogTable = "pg_catalog.pg_language"    // procedural languages
+	catalogCast       catalogTable = "pg_catalog.pg_cast"        // casts
+	catalogOperator   catalogTable = "pg_catalog.pg_operator"    // operators
+	catalogTSConfig   catalogTable = "pg_catalog.pg_ts_config"   // text search configurations
+	catalogTSDict     catalogTable = "pg_catalog.pg_ts_dict"     // text search dictionaries
+	catalogTSParser   catalogTable = "pg_catalog.pg_ts_parser"   // text search parsers
+	catalogTSTemplate catalogTable = "pg_catalog.pg_ts_template" // text search templates
 )
 
 // extensionMembership is the condition on pg_depend d that it is the row

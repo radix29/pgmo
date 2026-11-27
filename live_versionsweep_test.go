@@ -81,6 +81,29 @@ var sweepSchema = []string{
 	`CREATE FUNCTION app.f(x app.mood) RETURNS integer LANGUAGE sql AS 'SELECT 1'`,
 	`CREATE PROCEDURE app.p(INOUT a integer) LANGUAGE sql AS 'SELECT a'`,
 	`CREATE AGGREGATE app.ag(*) (sfunc = pg_catalog.int8inc, stype = bigint, initcond = '0')`,
+	// The P4.11 families: a commented collation (app.sweep_c, above); a
+	// text search parser and template over pg_catalog's C functions, a
+	// dictionary with options, and a commented configuration mapping two
+	// token types, one to two dictionaries; a commented language over
+	// plpgsql's handler; a commented cast by function; an infix operator
+	// with a negator (a shell operator) and a prefix one.
+	`COMMENT ON COLLATION app.sweep_c IS 'sweep'`,
+	`CREATE TEXT SEARCH PARSER app.sweep_prs (START = prsd_start, GETTOKEN = prsd_nexttoken, END = prsd_end, LEXTYPES = prsd_lextype)`,
+	`CREATE TEXT SEARCH TEMPLATE app.sweep_tmpl (LEXIZE = dsimple_lexize)`,
+	`CREATE TEXT SEARCH DICTIONARY app.sweep_dict (TEMPLATE = pg_catalog.simple, STOPWORDS = english)`,
+	`CREATE TEXT SEARCH CONFIGURATION app.sweep_cfg (PARSER = app.sweep_prs)`,
+	`ALTER TEXT SEARCH CONFIGURATION app.sweep_cfg ADD MAPPING FOR asciiword WITH app.sweep_dict, pg_catalog.english_stem`,
+	`ALTER TEXT SEARCH CONFIGURATION app.sweep_cfg ADD MAPPING FOR int WITH pg_catalog.simple`,
+	`COMMENT ON TEXT SEARCH CONFIGURATION app.sweep_cfg IS 'sweep'`,
+	`CREATE LANGUAGE sweep_pl HANDLER plpgsql_call_handler`,
+	`COMMENT ON LANGUAGE sweep_pl IS 'sweep'`,
+	`CREATE CAST (app.mood AS integer) WITH FUNCTION app.f(app.mood) AS ASSIGNMENT`,
+	`COMMENT ON CAST (app.mood AS integer) IS 'sweep'`,
+	`CREATE FUNCTION app.eqm(integer, app.mood) RETURNS boolean LANGUAGE sql AS 'SELECT true'`,
+	`CREATE OPERATOR app.=== (LEFTARG = integer, RIGHTARG = app.mood, FUNCTION = app.eqm,
+	   NEGATOR = OPERATOR(app.@@@), RESTRICT = eqsel, HASHES)`,
+	`CREATE OPERATOR app.!! (RIGHTARG = integer, FUNCTION = app.f)`,
+	`COMMENT ON OPERATOR app.=== (integer, app.mood) IS 'sweep'`,
 	`CREATE FUNCTION app.touch() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END'`,
 	`CREATE TRIGGER child_touch BEFORE INSERT ON app.child FOR EACH ROW EXECUTE FUNCTION app.touch()`,
 	// A view's INSTEAD OF trigger with arguments, and a commented event
@@ -240,6 +263,42 @@ func TestLiveVersionSweep(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	pgDefault, err := srv.TablespaceByName(ctx, "pg_default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sweepC, err := db.CollationByName(ctx, "app", "sweep_c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tsParser, err := db.TextSearchParserByName(ctx, "app", "sweep_prs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tsTemplate, err := db.TextSearchTemplateByName(ctx, "app", "sweep_tmpl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tsDict, err := db.TextSearchDictionaryByName(ctx, "app", "sweep_dict")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tsConfig, err := db.TextSearchConfigurationByName(ctx, "app", "sweep_cfg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lang, err := db.LanguageByName(ctx, "sweep_pl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cast, err := db.CastByTypes(ctx, mood.OID, 23)
+	if err != nil {
+		t.Fatal(err)
+	}
+	op, err := db.OperatorByName(ctx, "app", "===", 23, mood.OID)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	for _, role := range []string{"", plain} {
 		name := "connected role"
@@ -250,7 +309,9 @@ func TestLiveVersionSweep(t *testing.T) {
 			sw := &sweep{t: t, ctx: ctx, srv: srv, role: role}
 			for typeName, recv := range map[string]any{"Server": srv, "Database": db, "Role": plainRole, "Table": child,
 				"View": view, "MaterializedView": matview, "Sequence": counter, "Type": mood, "Domain": code, "Function": touch, "Procedure": proc, "Aggregate": agg,
-				"Trigger": trig, "EventTrigger": evt, "Extension": citext} {
+				"Trigger": trig, "EventTrigger": evt, "Extension": citext,
+				"Tablespace": pgDefault, "Collation": sweepC, "TextSearchParser": tsParser, "TextSearchTemplate": tsTemplate,
+				"TextSearchDictionary": tsDict, "TextSearchConfiguration": tsConfig, "Language": lang, "Cast": cast, "Operator": op} {
 				sw.reflectSweep(typeName, scratch, recv)
 			}
 			sweepServerReads(sw, scratch)
@@ -263,6 +324,9 @@ func TestLiveVersionSweep(t *testing.T) {
 			sweepTypes(sw, db)
 			sweepTriggers(sw, db)
 			sweepExtensions(sw, db)
+			sweepTablespaces(sw)
+			sweepCatalogObjects(sw, db, mood.OID)
+			sweepTextSearch(sw, db)
 			sweepRoutineFamilies(sw, db)
 			sweepRoutines(sw)
 			sweepFragments(sw)
@@ -907,6 +971,302 @@ func sweepExtensions(sw *sweep, db *Database) {
 	})
 }
 
+// sweepTablespaces drives the tablespace reads with an assertion on their
+// rows: the listing narrowed to the built-in ones, pg_global by name, and
+// two sizes — pg_default's, any role's (the session's database lives
+// there), and pg_global's as the connected role. The plain role's refusal
+// for pg_global (42501) is TestLiveTablespaces': here it would abort the
+// call's transaction.
+func sweepTablespaces(sw *sweep) {
+	check := func(t *Tablespace, name string) error {
+		if t.OID == 0 || t.Name != name || t.Owner == "" || !t.IsSystem || t.Extension != "" || t.Location != "" ||
+			t.Options != nil || !t.PrivilegesDefault || len(t.Privileges) != 1 || t.Privileges[0].Privilege != PrivilegeCreate ||
+			t.Server() != sw.srv {
+			return fmt.Errorf("%+v: want initdb's %s, its owner's CREATE alone", t, name)
+		}
+		return nil
+	}
+	sw.call("Server.Tablespaces(system)", func(ctx context.Context) error {
+		yes := true
+		ts, err := sw.srv.Tablespaces(ctx, ObjectFilter{System: &yes})
+		if err != nil {
+			return err
+		}
+		if len(ts) != 2 {
+			return fmt.Errorf("%d tablespaces, want pg_default and pg_global", len(ts))
+		}
+		if err := check(ts[0], "pg_default"); err != nil {
+			return err
+		}
+		return check(ts[1], "pg_global")
+	})
+	sw.call("Server.TablespaceByName(pg_global)", func(ctx context.Context) error {
+		t, err := sw.srv.TablespaceByName(ctx, "pg_global")
+		if err != nil {
+			return err
+		}
+		return check(t, "pg_global")
+	})
+	sw.call("Tablespace.Size(pg_default)", func(ctx context.Context) error {
+		n, err := sw.srv.TablespaceRef("pg_default").Size(ctx)
+		if err == nil && n <= 0 {
+			err = fmt.Errorf("size %d, want > 0", n)
+		}
+		return err
+	})
+	if sw.role != "" {
+		return
+	}
+	sw.call("Tablespace.Size(pg_global)", func(ctx context.Context) error {
+		n, err := sw.srv.TablespaceRef("pg_global").Size(ctx)
+		if err == nil && n <= 0 {
+			err = fmt.Errorf("size %d, want > 0", n)
+		}
+		return err
+	})
+}
+
+// sweepCatalogObjects drives the collation, language, cast and operator
+// reads with an assertion on their rows, each on the fixture's object: the
+// listings narrowed to it, and the by-name reads.
+func sweepCatalogObjects(sw *sweep, db *Database, mood OID) {
+	// citext, in app, brings casts and operators of its own: members.
+	app := ObjectFilter{Schema: []TextCriterion{{TextEquals, "app"}}, ExtensionMember: new(bool)}
+	checkCollation := func(c *Collation) error {
+		if c.OID == 0 || c.Schema != "app" || c.Name != "sweep_c" || c.Owner == "" || c.Origin != (Origin{}) ||
+			c.Provider != LocaleProviderLibc || !c.Deterministic || c.Collate != "C" || c.CType != "C" ||
+			c.Locale != "" || c.ICURules != "" || c.Comment != "sweep" || c.Database() != db {
+			return fmt.Errorf("%+v: want libc's C as app.sweep_c, commented", c)
+		}
+		return nil
+	}
+	sw.call("Database.Collations(app)", func(ctx context.Context) error {
+		cs, err := db.Collations(ctx, app)
+		if err != nil {
+			return err
+		}
+		if len(cs) != 1 {
+			return fmt.Errorf("%d collations, want app.sweep_c alone", len(cs))
+		}
+		return checkCollation(cs[0])
+	})
+	sw.call("Database.CollationByName(app.sweep_c)", func(ctx context.Context) error {
+		c, err := db.CollationByName(ctx, "app", "sweep_c")
+		if err != nil {
+			return err
+		}
+		return checkCollation(c)
+	})
+	checkLanguage := func(l *Language) error {
+		if l.OID == 0 || l.Name != "sweep_pl" || l.Owner == "" || l.Origin != (Origin{}) || !l.Procedural || l.Trusted ||
+			l.Handler != (ObjectName{"pg_catalog", "plpgsql_call_handler"}) || l.Inline != (ObjectName{}) ||
+			l.Validator != (ObjectName{}) || !l.PrivilegesDefault || len(l.Privileges) != 2 || l.Comment != "sweep" ||
+			l.Database() != db {
+			return fmt.Errorf("%+v: want sweep_pl over plpgsql's handler, commented", l)
+		}
+		return nil
+	}
+	sw.call("Database.Languages(sweep_pl)", func(ctx context.Context) error {
+		no := false
+		ls, err := db.Languages(ctx, ObjectFilter{System: &no})
+		if err != nil {
+			return err
+		}
+		if len(ls) != 1 {
+			return fmt.Errorf("%d user languages, want sweep_pl alone", len(ls))
+		}
+		return checkLanguage(ls[0])
+	})
+	sw.call("Database.LanguageByName(sweep_pl)", func(ctx context.Context) error {
+		l, err := db.LanguageByName(ctx, "sweep_pl")
+		if err != nil {
+			return err
+		}
+		return checkLanguage(l)
+	})
+	checkCast := func(c *Cast) error {
+		if c.OID == 0 || c.Origin != (Origin{}) || c.SourceType != mood || c.Source != "app.mood" || c.TargetType != 23 ||
+			c.Target != "integer" || c.Function != (ObjectName{"app", "f"}) || c.Context != CastAssignment ||
+			c.Method != CastByFunction || c.Comment != "sweep" || c.Database() != db {
+			return fmt.Errorf("%+v: want (app.mood AS integer) by app.f on assignment, commented", c)
+		}
+		return nil
+	}
+	sw.call("Database.Casts(user)", func(ctx context.Context) error {
+		no := false
+		cs, err := db.Casts(ctx, ObjectFilter{System: &no, ExtensionMember: &no})
+		if err != nil {
+			return err
+		}
+		// CREATE TYPE … AS RANGE made a cast of its own (deptype 'i' on
+		// both types): explicit, by the multirange's constructor.
+		if len(cs) != 2 || cs[1].Signature() != "(app.span AS app.spans)" || cs[1].Context != CastExplicit ||
+			cs[1].Method != CastByFunction || cs[1].Function != (ObjectName{"app", "spans"}) {
+			return fmt.Errorf("%d user casts: want (app.mood AS integer), then the range's (app.span AS app.spans)", len(cs))
+		}
+		return checkCast(cs[0])
+	})
+	sw.call("Database.CastByTypes(app.mood, integer)", func(ctx context.Context) error {
+		c, err := db.CastByTypes(ctx, mood, 23)
+		if err != nil {
+			return err
+		}
+		return checkCast(c)
+	})
+	checkOperator := func(o *Operator) error {
+		if o.OID == 0 || o.Schema != "app" || o.Name != "===" || o.Owner == "" || o.Origin != (Origin{}) ||
+			o.Kind != OperatorInfix || o.LeftType != 23 || o.Left != "integer" || o.RightType != mood ||
+			o.Right != "app.mood" || o.ResultType != 16 || o.Result != "boolean" ||
+			o.Function != (ObjectName{"app", "eqm"}) || o.Commutator != (ObjectName{}) ||
+			o.Negator != (ObjectName{"app", "@@@"}) || o.Restrict != (ObjectName{"pg_catalog", "eqsel"}) ||
+			o.Join != (ObjectName{}) || o.Merges || !o.Hashes || o.Comment != "sweep" || o.Database() != db {
+			return fmt.Errorf("%+v: want app.=== (integer, app.mood) by app.eqm, negated by app.@@@, commented", o)
+		}
+		return nil
+	}
+	sw.call("Database.Operators(app)", func(ctx context.Context) error {
+		os, err := db.Operators(ctx, app)
+		if err != nil {
+			return err
+		}
+		var names []string
+		for _, o := range os {
+			names = append(names, o.Signature())
+		}
+		if !slices.Equal(names, []string{"app.!! (NONE, integer)", "app.=== (integer, app.mood)", "app.@@@ (integer, app.mood)"}) {
+			return fmt.Errorf("operators %q: want app's prefix !!, === and its shell negator @@@", names)
+		}
+		if shell := os[2]; shell.Function != (ObjectName{}) || shell.ResultType != 0 || shell.Result != "" {
+			return fmt.Errorf("%+v: want a shell operator, no function or result", shell)
+		}
+		return checkOperator(os[1])
+	})
+	sw.call("Database.OperatorByName(app.===)", func(ctx context.Context) error {
+		o, err := db.OperatorByName(ctx, "app", "===", 23, mood)
+		if err != nil {
+			return err
+		}
+		return checkOperator(o)
+	})
+}
+
+// sweepTextSearch drives the four text search families' reads with an
+// assertion on their rows: each listing narrowed to app, and each by-name
+// read of the fixture's object.
+func sweepTextSearch(sw *sweep, db *Database) {
+	app := ObjectFilter{Schema: []TextCriterion{{TextEquals, "app"}}}
+	one := func(n int, what string) error {
+		if n != 1 {
+			return fmt.Errorf("%d %s, want the fixture's alone", n, what)
+		}
+		return nil
+	}
+	checkParser := func(p *TextSearchParser) error {
+		if p.OID == 0 || p.Schema != "app" || p.Name != "sweep_prs" || p.Origin != (Origin{}) ||
+			p.Start != (ObjectName{"pg_catalog", "prsd_start"}) || p.Token != (ObjectName{"pg_catalog", "prsd_nexttoken"}) ||
+			p.End != (ObjectName{"pg_catalog", "prsd_end"}) || p.LexTypes != (ObjectName{"pg_catalog", "prsd_lextype"}) ||
+			p.Headline != (ObjectName{}) || p.Comment != "" || p.Database() != db {
+			return fmt.Errorf("%+v: want app.sweep_prs over the default parser's functions, no headline", p)
+		}
+		return nil
+	}
+	sw.call("Database.TextSearchParsers(app)", func(ctx context.Context) error {
+		ps, err := db.TextSearchParsers(ctx, app)
+		if err == nil {
+			err = one(len(ps), "parsers")
+		}
+		if err != nil {
+			return err
+		}
+		return checkParser(ps[0])
+	})
+	sw.call("Database.TextSearchParserByName(app.sweep_prs)", func(ctx context.Context) error {
+		p, err := db.TextSearchParserByName(ctx, "app", "sweep_prs")
+		if err != nil {
+			return err
+		}
+		return checkParser(p)
+	})
+	checkTemplate := func(t *TextSearchTemplate) error {
+		if t.OID == 0 || t.Schema != "app" || t.Name != "sweep_tmpl" || t.Origin != (Origin{}) || t.Init != (ObjectName{}) ||
+			t.Lexize != (ObjectName{"pg_catalog", "dsimple_lexize"}) || t.Comment != "" || t.Database() != db {
+			return fmt.Errorf("%+v: want app.sweep_tmpl over dsimple_lexize, no init", t)
+		}
+		return nil
+	}
+	sw.call("Database.TextSearchTemplates(app)", func(ctx context.Context) error {
+		ts, err := db.TextSearchTemplates(ctx, app)
+		if err == nil {
+			err = one(len(ts), "templates")
+		}
+		if err != nil {
+			return err
+		}
+		return checkTemplate(ts[0])
+	})
+	sw.call("Database.TextSearchTemplateByName(app.sweep_tmpl)", func(ctx context.Context) error {
+		t, err := db.TextSearchTemplateByName(ctx, "app", "sweep_tmpl")
+		if err != nil {
+			return err
+		}
+		return checkTemplate(t)
+	})
+	checkDict := func(dc *TextSearchDictionary) error {
+		if dc.OID == 0 || dc.Schema != "app" || dc.Name != "sweep_dict" || dc.Owner == "" || dc.Origin != (Origin{}) ||
+			dc.Template != (ObjectName{"pg_catalog", "simple"}) || dc.Options != "stopwords = 'english'" ||
+			dc.Comment != "" || dc.Database() != db {
+			return fmt.Errorf("%+v: want app.sweep_dict on simple with english stop words", dc)
+		}
+		return nil
+	}
+	sw.call("Database.TextSearchDictionaries(app)", func(ctx context.Context) error {
+		ds, err := db.TextSearchDictionaries(ctx, app)
+		if err == nil {
+			err = one(len(ds), "dictionaries")
+		}
+		if err != nil {
+			return err
+		}
+		return checkDict(ds[0])
+	})
+	sw.call("Database.TextSearchDictionaryByName(app.sweep_dict)", func(ctx context.Context) error {
+		dc, err := db.TextSearchDictionaryByName(ctx, "app", "sweep_dict")
+		if err != nil {
+			return err
+		}
+		return checkDict(dc)
+	})
+	wantMappings := []TextSearchMapping{
+		{TokenType: "asciiword", Dictionaries: []ObjectName{{"app", "sweep_dict"}, {"pg_catalog", "english_stem"}}},
+		{TokenType: "int", Dictionaries: []ObjectName{{"pg_catalog", "simple"}}},
+	}
+	checkConfig := func(c *TextSearchConfiguration) error {
+		if c.OID == 0 || c.Schema != "app" || c.Name != "sweep_cfg" || c.Owner == "" || c.Origin != (Origin{}) ||
+			c.Parser != (ObjectName{"app", "sweep_prs"}) || !reflect.DeepEqual(c.Mappings, wantMappings) ||
+			c.Comment != "sweep" || c.Database() != db {
+			return fmt.Errorf("%+v: want app.sweep_cfg on app.sweep_prs mapping asciiword and int, commented", c)
+		}
+		return nil
+	}
+	sw.call("Database.TextSearchConfigurations(app)", func(ctx context.Context) error {
+		cs, err := db.TextSearchConfigurations(ctx, app)
+		if err == nil {
+			err = one(len(cs), "configurations")
+		}
+		if err != nil {
+			return err
+		}
+		return checkConfig(cs[0])
+	})
+	sw.call("Database.TextSearchConfigurationByName(app.sweep_cfg)", func(ctx context.Context) error {
+		c, err := db.TextSearchConfigurationByName(ctx, "app", "sweep_cfg")
+		if err != nil {
+			return err
+		}
+		return checkConfig(c)
+	})
+}
+
 // sweepTypes drives the type and domain reads with an assertion on their
 // rows: both listings narrowed to app, a by-name read of every kind — enum,
 // composite, range, multirange, an extension's base type, pg_catalog's
@@ -1022,9 +1382,9 @@ func sweepRoutineFamilies(sw *sweep, db *Database) {
 			names = append(names, f.Name)
 		}
 		// app.span's constructors (two) and app.spans' (three) beside them,
-		// and the trigger functions.
-		if want := []string{"f", "f", "on_ddl", "span", "span", "spans", "spans", "spans", "touch"}; err == nil && !slices.Equal(names, want) {
-			err = fmt.Errorf("%q: want app.f twice, app.on_ddl, the range's constructors and app.touch", names)
+		// the trigger functions, and the operator's.
+		if want := []string{"eqm", "f", "f", "on_ddl", "span", "span", "spans", "spans", "spans", "touch"}; err == nil && !slices.Equal(names, want) {
+			err = fmt.Errorf("%q: want app.eqm, app.f twice, app.on_ddl, the range's constructors and app.touch", names)
 		}
 		return err
 	})

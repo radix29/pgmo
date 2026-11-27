@@ -194,12 +194,14 @@ write a zero-argument aggregate as `AGGREGATE s.ag(*)` (or use `ROUTINE`):
 `system`/`extension` from `systemSchema`/`isExtensionMember` on the same
 expressions, so a row's flags and the filter never disagree. `catalogTable`
 holds `pg_class`, `pg_proc`, `pg_type`, `pg_namespace`,
-`pg_event_trigger` (P4.9); a family whose objects live elsewhere
-(operators, casts, FDWs, languages) adds its catalog. Objects with no schema
-(event triggers, extensions, casts, languages, FDWs) have no `IsSystem` by
-this rule — the family decides (an OID below `FirstNormalObjectId`, 16384,
-is the usual sign of a built-in one; event triggers use it, P4.9, and
-extensions, P4.10, where it marks plpgsql). The P5
+`pg_event_trigger` (P4.9), and P4.11's `pg_collation`, `pg_language`,
+`pg_cast`, `pg_operator` and the four `pg_ts_*`; a family whose objects
+live elsewhere (FDWs) adds its catalog. Objects with no schema
+(event triggers, extensions, casts, languages, tablespaces, FDWs) have no
+`IsSystem` by this rule — the family decides (an OID below
+`FirstNormalObjectId`, 16384, is the usual sign of a built-in one; event
+triggers use it, P4.9, extensions, P4.10, where it marks plpgsql, and
+tablespaces, languages and casts, P4.11). The P5
 scripter writes `CREATE EXTENSION` for a member, never the member's DDL.
 
 ## Databases: what P4.1 left
@@ -396,6 +398,25 @@ scripter writes `CREATE EXTENSION` for a member, never the member's DDL.
   `DROP EXTENSION … [CASCADE]`, `COMMENT ON EXTENSION` are P4.13.3. Who may
   create one is `AvailableExtensionVersion.Superuser`/`Trusted` and CREATE
   on the database — a refusal pgMS can show before sending.
+
+## Tablespaces, collations, text search, languages, casts, operators: what P4.11 left
+
+- **A collation's actual version is not read.** `Collation.Version` is
+  what was recorded; `pg_collation_actual_version(oid)` asks the provider
+  now, and a difference means indexes may need rebuilding (`ALTER
+  COLLATION … REFRESH VERSION`). One call per collation, so an on-demand
+  read (`Collation.ActualVersion(ctx)`) when pgMS's properties pane wants
+  the warning.
+- **A cast has no name filter.** `ObjectFilter.Name` takes one column; a
+  cast is two type names. pgMS's Casts folder filters in Go, or a later
+  filter field takes either type's name.
+- **Operator classes and families, access methods, conversions,
+  statistics objects, publications and subscriptions** have no family
+  yet; extension members of those kinds are named by `Extension.Members`
+  alone.
+- **No writes here.** Tablespace create/rename/owner/options/drop is
+  P4.13.3 (`CREATE TABLESPACE` cannot run in a transaction); the others
+  are scripted by P5 from these reads.
 
 ## Routines: what P4.6 left
 

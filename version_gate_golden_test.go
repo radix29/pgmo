@@ -73,6 +73,12 @@ var goldenQueries = []goldenQuery{
 		columns:   []string{"conenforced"},
 		render:    constraintsQuery,
 	},
+	{
+		name:      "collation",
+		relations: []string{"pg_collation"},
+		columns:   []string{"colliculocale", "colllocale", "collicurules"},
+		render:    collationSelect,
+	},
 }
 
 // covers reports whether g is one of the column gates q is expected to

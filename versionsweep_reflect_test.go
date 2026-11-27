@@ -46,6 +46,16 @@ var sweptTypes = map[string]reflect.Type{
 
 	"Extension": reflect.TypeFor[*Extension](),
 
+	"Tablespace":              reflect.TypeFor[*Tablespace](),
+	"Collation":               reflect.TypeFor[*Collation](),
+	"TextSearchParser":        reflect.TypeFor[*TextSearchParser](),
+	"TextSearchTemplate":      reflect.TypeFor[*TextSearchTemplate](),
+	"TextSearchDictionary":    reflect.TypeFor[*TextSearchDictionary](),
+	"TextSearchConfiguration": reflect.TypeFor[*TextSearchConfiguration](),
+	"Language":                reflect.TypeFor[*Language](),
+	"Cast":                    reflect.TypeFor[*Cast](),
+	"Operator":                reflect.TypeFor[*Operator](),
+
 	"Function":  reflect.TypeFor[*Function](),
 	"Procedure": reflect.TypeFor[*Procedure](),
 	"Aggregate": reflect.TypeFor[*Aggregate](),
@@ -126,6 +136,23 @@ var sweepReaders = map[string]string{
 	"Extension.Members":                 "Extension.Members",
 	"Database.AvailableExtensions":      "Database.AvailableExtensions",
 	"Database.AvailableExtensionByName": "Database.AvailableExtensionByName",
+
+	"Server.Tablespaces":       "Server.Tablespaces",
+	"Server.TablespaceByName":  "Server.TablespaceByName",
+	"Tablespace.Size":          "Tablespace.Size",
+	"Database.Collations":      "Database.Collations",
+	"Database.CollationByName": "Database.CollationByName",
+	"Database.Languages":       "Database.Languages",
+	"Database.LanguageByName":  "Database.LanguageByName",
+	"Database.Casts":           "Database.Casts",
+	"Database.CastByTypes":     "Database.CastByTypes",
+	"Database.Operators":       "Database.Operators",
+	"Database.OperatorByName":  "Database.OperatorByName",
+
+	// The text search families' shared readers, each driven through every
+	// family (sweepMustCall lists all four).
+	"listTextSearch":   "Database.TextSearchConfigurations",
+	"textSearchByName": "Database.TextSearchConfigurationByName",
 
 	// The routine families' shared readers, each driven through every
 	// family (sweepMustCall lists all three).
@@ -248,6 +275,33 @@ var sweepMustCall = []string{
 	"Extension.Members",
 	"Database.AvailableExtensions",
 	"Database.AvailableExtensionByName",
+
+	// The P4.11 families: tablespaces (reflective, and by hand: the
+	// listing with a filter, by name, and the size of pg_default — any
+	// role's, its session's database living there — and of pg_global,
+	// refused to the plain role); collations, languages, casts, operators
+	// and the four text search families (reflective on the scratch
+	// database, and by hand with a filter, each by-name read on a fixture
+	// object).
+	"Server.Tablespaces",
+	"Server.TablespaceByName",
+	"Tablespace.Size",
+	"Database.Collations",
+	"Database.CollationByName",
+	"Database.TextSearchParsers",
+	"Database.TextSearchParserByName",
+	"Database.TextSearchTemplates",
+	"Database.TextSearchTemplateByName",
+	"Database.TextSearchDictionaries",
+	"Database.TextSearchDictionaryByName",
+	"Database.TextSearchConfigurations",
+	"Database.TextSearchConfigurationByName",
+	"Database.Languages",
+	"Database.LanguageByName",
+	"Database.Casts",
+	"Database.CastByTypes",
+	"Database.Operators",
+	"Database.OperatorByName",
 
 	// The query fragments the P4 families will build their listings from.
 	// No read sends them yet, so the sweep runs each in a query of its own,
