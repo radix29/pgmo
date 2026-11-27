@@ -84,6 +84,12 @@ var bareRefusalsAllowed = map[string][]string{
 	// A routine row whose argument arrays do not line up, or whose input
 	// arguments are not its proargtypes.
 	"routine.go": {"argument arrays of different lengths", "argument types "},
+	// A composite type's attribute arrays, or a domain's constraint arrays,
+	// that do not line up.
+	"type.go":   {"attribute arrays of different lengths"},
+	"domain.go": {"constraint arrays of different lengths"},
+	// An extension row's configuration table arrays that do not line up.
+	"extension.go": {"configuration arrays of different lengths"},
 }
 
 // A call refused for its own arguments wraps ErrInvalidRequest, so a caller

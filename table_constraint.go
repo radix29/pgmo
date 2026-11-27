@@ -25,7 +25,7 @@ const (
 	ConstraintForeignKey ConstraintKind = "f"
 	ConstraintCheck      ConstraintKind = "c"
 	ConstraintExclusion  ConstraintKind = "x"
-	ConstraintNotNull    ConstraintKind = "n" // 18+
+	ConstraintNotNull    ConstraintKind = "n" // a table's from 18, a domain's from 17
 )
 
 // String names the kind as a constraint definition spells it: PRIMARY KEY,

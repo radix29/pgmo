@@ -64,6 +64,10 @@ func (v *View) SetDatabase(d *Database) { v.db = d }
 // compare the catalog fields of two MaterializedViews with reflect.DeepEqual.
 func (m *MaterializedView) SetDatabase(d *Database) { m.db = d }
 
+// SetDatabase replaces the Sequence's back-pointer, so a test can compare
+// the catalog fields of two Sequences with reflect.DeepEqual.
+func (seq *Sequence) SetDatabase(d *Database) { seq.db = d }
+
 // SetDatabase replaces the Function's back-pointer, so a test can compare the
 // catalog fields of two Functions with reflect.DeepEqual.
 func (f *Function) SetDatabase(d *Database) { f.db = d }
@@ -75,3 +79,32 @@ func (p *Procedure) SetDatabase(d *Database) { p.db = d }
 // SetDatabase replaces the Aggregate's back-pointer, so a test can compare
 // the catalog fields of two Aggregates with reflect.DeepEqual.
 func (a *Aggregate) SetDatabase(d *Database) { a.db = d }
+
+// SetDatabase replaces the Type's back-pointer, so a test can compare the
+// catalog fields of two Types with reflect.DeepEqual.
+func (ty *Type) SetDatabase(d *Database) { ty.db = d }
+
+// SetDatabase replaces the Domain's back-pointer, so a test can compare the
+// catalog fields of two Domains with reflect.DeepEqual.
+func (dm *Domain) SetDatabase(d *Database) { dm.db = d }
+
+// SetDatabase replaces the Trigger's back-pointer, so a test can compare the
+// catalog fields of two Triggers with reflect.DeepEqual.
+func (t *Trigger) SetDatabase(d *Database) { t.db = d }
+
+// SetDatabase replaces the EventTrigger's back-pointer, so a test can compare
+// the catalog fields of two EventTriggers with reflect.DeepEqual.
+func (e *EventTrigger) SetDatabase(d *Database) { e.db = d }
+
+// SetDatabase replaces the Extension's back-pointer, so a test can compare
+// the catalog fields of two Extensions with reflect.DeepEqual.
+func (e *Extension) SetDatabase(d *Database) { e.db = d }
+
+// SetDatabase replaces the AvailableExtension's back-pointer, so a test can
+// compare the catalog fields of two AvailableExtensions with
+// reflect.DeepEqual.
+func (a *AvailableExtension) SetDatabase(d *Database) { a.db = d }
+
+// CompareExtensionVersions is compareExtensionVersions, for the external
+// tests.
+var CompareExtensionVersions = compareExtensionVersions

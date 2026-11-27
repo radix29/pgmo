@@ -36,6 +36,16 @@ var sweptTypes = map[string]reflect.Type{
 	"View":             reflect.TypeFor[*View](),
 	"MaterializedView": reflect.TypeFor[*MaterializedView](),
 
+	"Sequence": reflect.TypeFor[*Sequence](),
+
+	"Type":   reflect.TypeFor[*Type](),
+	"Domain": reflect.TypeFor[*Domain](),
+
+	"Trigger":      reflect.TypeFor[*Trigger](),
+	"EventTrigger": reflect.TypeFor[*EventTrigger](),
+
+	"Extension": reflect.TypeFor[*Extension](),
+
 	"Function":  reflect.TypeFor[*Function](),
 	"Procedure": reflect.TypeFor[*Procedure](),
 	"Aggregate": reflect.TypeFor[*Aggregate](),
@@ -83,7 +93,7 @@ var sweepReaders = map[string]string{
 	"Table.Columns":              "Table.Columns",
 	"Table.Constraints":          "Table.Constraints",
 	"Table.Indexes":              "Table.Indexes",
-	"Table.Triggers":             "Table.Triggers",
+	"relationTriggers":           "Table.Triggers",
 	"Table.Policies":             "Table.Policies",
 	"Table.Children":             "Table.Children",
 	"Table.Size":                 "Table.Size",
@@ -96,6 +106,26 @@ var sweepReaders = map[string]string{
 	"MaterializedView.Columns":        "MaterializedView.Columns",
 	"MaterializedView.Indexes":        "MaterializedView.Indexes",
 	"MaterializedView.Size":           "MaterializedView.Size",
+
+	"Database.Sequences":      "Database.Sequences",
+	"Database.SequenceByName": "Database.SequenceByName",
+	"Sequence.LastValue":      "Sequence.LastValue",
+
+	"Database.Types":        "Database.Types",
+	"Database.TypeByName":   "Database.TypeByName",
+	"Database.Domains":      "Database.Domains",
+	"Database.DomainByName": "Database.DomainByName",
+
+	"Database.Triggers":           "Database.Triggers",
+	"Database.TriggerByName":      "Database.TriggerByName",
+	"Database.EventTriggers":      "Database.EventTriggers",
+	"Database.EventTriggerByName": "Database.EventTriggerByName",
+
+	"Database.Extensions":               "Database.Extensions",
+	"Database.ExtensionByName":          "Database.ExtensionByName",
+	"Extension.Members":                 "Extension.Members",
+	"Database.AvailableExtensions":      "Database.AvailableExtensions",
+	"Database.AvailableExtensionByName": "Database.AvailableExtensionByName",
 
 	// The routine families' shared readers, each driven through every
 	// family (sweepMustCall lists all three).
@@ -182,6 +212,42 @@ var sweepMustCall = []string{
 	"Database.Aggregates",
 	"Database.AggregateByName",
 	"Database.RoutineByName",
+
+	// The sequence family (P4.7): the listing (reflective on the scratch
+	// database, and by hand with a filter), the by-name read, and the last
+	// value (reflective on the fixture's sequence, and by hand: a value as
+	// the connected role, refused as the plain one).
+	"Database.Sequences",
+	"Database.SequenceByName",
+	"Sequence.LastValue",
+
+	// The type and domain families (P4.8): the listings (reflective on the
+	// scratch database, and by hand with a filter) and the by-name reads of
+	// each kind.
+	"Database.Types",
+	"Database.TypeByName",
+	"Database.Domains",
+	"Database.DomainByName",
+
+	// The trigger families (P4.9): the database's triggers and event
+	// triggers (reflective on the scratch database, and by hand with a
+	// filter), both by-name reads, and a view's triggers (reflective on the
+	// fixture's view, and by hand) — the read Table.Triggers shares.
+	"Database.Triggers",
+	"Database.TriggerByName",
+	"View.Triggers",
+	"Database.EventTriggers",
+	"Database.EventTriggerByName",
+
+	// The extension family (P4.10): the installed listing and the
+	// available one (reflective on the scratch database, and by hand with a
+	// filter), both by-name reads, and an extension's members (reflective
+	// on the fixture's citext, and by hand).
+	"Database.Extensions",
+	"Database.ExtensionByName",
+	"Extension.Members",
+	"Database.AvailableExtensions",
+	"Database.AvailableExtensionByName",
 
 	// The query fragments the P4 families will build their listings from.
 	// No read sends them yet, so the sweep runs each in a query of its own,

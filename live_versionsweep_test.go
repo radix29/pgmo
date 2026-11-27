@@ -58,10 +58,24 @@ var sweepSchema = []string{
 	`CREATE SERVER sweep_remote FOREIGN DATA WRAPPER postgres_fdw OPTIONS (host 'sweep.invalid')`,
 	`CREATE FOREIGN TABLE app.remote (id integer) SERVER sweep_remote`,
 	`CREATE SEQUENCE app.seq AS integer`,
+	// A sequence owned by a column, called once (its CACHE stores the fifth
+	// value), with a comment, and readable by PUBLIC, so the plain role's
+	// pass reads its last value where app.seq's is refused.
+	`CREATE SEQUENCE app.counter AS smallint INCREMENT BY -2 CACHE 5 CYCLE OWNED BY app.child.id`,
+	`SELECT pg_catalog.nextval('app.counter')`,
+	`GRANT USAGE ON SEQUENCE app.counter TO PUBLIC`,
+	`COMMENT ON SEQUENCE app.counter IS 'sweep'`,
 	`CREATE TYPE app.mood AS ENUM ('ok', 'not ok')`,
 	`CREATE TYPE app.pair AS (a integer, b text)`,
 	`CREATE DOMAIN app.positive AS integer CHECK (VALUE > 0)`,
 	`CREATE COLLATION app.sweep_c FROM "C"`,
+	// A range with a named multirange, a commented enum, and a domain with
+	// a collation, a default and NOT NULL (a constraint row of its own from
+	// 17) granted to PUBLIC.
+	`CREATE TYPE app.span AS RANGE (subtype = integer, multirange_type_name = app.spans)`,
+	`COMMENT ON TYPE app.mood IS 'sweep'`,
+	`CREATE DOMAIN app.code AS varchar(8) COLLATE app.sweep_c DEFAULT 'x' NOT NULL`,
+	`GRANT USAGE ON DOMAIN app.code TO PUBLIC`,
 	// Overloads, so routineByName meets ErrAmbiguous as well as a match.
 	`CREATE FUNCTION app.f(x integer) RETURNS integer LANGUAGE sql AS 'SELECT x'`,
 	`CREATE FUNCTION app.f(x app.mood) RETURNS integer LANGUAGE sql AS 'SELECT 1'`,
@@ -69,6 +83,13 @@ var sweepSchema = []string{
 	`CREATE AGGREGATE app.ag(*) (sfunc = pg_catalog.int8inc, stype = bigint, initcond = '0')`,
 	`CREATE FUNCTION app.touch() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END'`,
 	`CREATE TRIGGER child_touch BEFORE INSERT ON app.child FOR EACH ROW EXECUTE FUNCTION app.touch()`,
+	// A view's INSTEAD OF trigger with arguments, and a commented event
+	// trigger narrowed to one command tag.
+	`CREATE TRIGGER names_update INSTEAD OF UPDATE ON app.parent_names FOR EACH ROW EXECUTE FUNCTION app.touch('a', '')`,
+	`CREATE FUNCTION app.on_ddl() RETURNS event_trigger LANGUAGE plpgsql AS 'BEGIN END'`,
+	`CREATE EVENT TRIGGER sweep_ddl ON ddl_command_end WHEN TAG IN ('create table') EXECUTE FUNCTION app.on_ddl()`,
+	`COMMENT ON EVENT TRIGGER sweep_ddl IS 'sweep'`,
+	`COMMENT ON EXTENSION citext IS 'sweep'`,
 	`CREATE STATISTICS app.parent_stats ON id, amount FROM app.parent`,
 	`ALTER TABLE app.child ENABLE ROW LEVEL SECURITY`,
 	`CREATE POLICY child_all ON app.child USING (true)`,
@@ -183,6 +204,18 @@ func TestLiveVersionSweep(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	counter, err := db.SequenceByName(ctx, "app", "counter")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mood, err := db.TypeByName(ctx, "app", "mood")
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, err := db.DomainByName(ctx, "app", "code")
+	if err != nil {
+		t.Fatal(err)
+	}
 	touch, err := db.FunctionByName(ctx, "app", "touch", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -195,6 +228,18 @@ func TestLiveVersionSweep(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	trig, err := db.TriggerByName(ctx, "app", "parent_names", "names_update")
+	if err != nil {
+		t.Fatal(err)
+	}
+	evt, err := db.EventTriggerByName(ctx, "sweep_ddl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	citext, err := db.ExtensionByName(ctx, "citext")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	for _, role := range []string{"", plain} {
 		name := "connected role"
@@ -204,7 +249,8 @@ func TestLiveVersionSweep(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			sw := &sweep{t: t, ctx: ctx, srv: srv, role: role}
 			for typeName, recv := range map[string]any{"Server": srv, "Database": db, "Role": plainRole, "Table": child,
-				"View": view, "MaterializedView": matview, "Function": touch, "Procedure": proc, "Aggregate": agg} {
+				"View": view, "MaterializedView": matview, "Sequence": counter, "Type": mood, "Domain": code, "Function": touch, "Procedure": proc, "Aggregate": agg,
+				"Trigger": trig, "EventTrigger": evt, "Extension": citext} {
 				sw.reflectSweep(typeName, scratch, recv)
 			}
 			sweepServerReads(sw, scratch)
@@ -213,6 +259,10 @@ func TestLiveVersionSweep(t *testing.T) {
 			sweepSchemas(sw, db)
 			sweepTables(sw, db)
 			sweepViews(sw, db)
+			sweepSequences(sw, db)
+			sweepTypes(sw, db)
+			sweepTriggers(sw, db)
+			sweepExtensions(sw, db)
 			sweepRoutineFamilies(sw, db)
 			sweepRoutines(sw)
 			sweepFragments(sw)
@@ -658,6 +708,307 @@ func sweepViews(sw *sweep, db *Database) {
 	})
 }
 
+// sweepSequences drives the sequence reads with an assertion on their rows:
+// the listing narrowed to app, the by-name read, and the last value of
+// app.counter (PUBLIC may read it) and of app.seq (never called; refused to
+// the plain role, who holds no privilege on it).
+func sweepSequences(sw *sweep, db *Database) {
+	sw.call("Database.Sequences(app)", func(ctx context.Context) error {
+		qs, err := db.Sequences(ctx, ObjectFilter{Schema: []TextCriterion{{TextEquals, "app"}}})
+		if err == nil && (len(qs) != 2 || qs[0].Name != "counter" || qs[1].Name != "seq") {
+			err = fmt.Errorf("%d sequences: want app.counter, app.seq", len(qs))
+		}
+		return err
+	})
+	sw.call("Database.SequenceByName(app.counter)", func(ctx context.Context) error {
+		q, err := db.SequenceByName(ctx, "app", "counter")
+		if err == nil && (q.OID == 0 || q.Owner == "" || q.DataType != "smallint" || q.Start != -1 || q.Increment != -2 ||
+			q.MinValue != -32768 || q.MaxValue != -1 || q.Cache != 5 || !q.Cycle || q.Persistence != PersistencePermanent ||
+			q.OwnedBy != (ObjectName{"app", "child"}) || q.OwnedByColumn != "id" || q.Identity ||
+			q.PrivilegesDefault || q.Comment != "sweep") {
+			err = fmt.Errorf("%+v: want the descending smallint cycle owned by app.child.id, granted, commented", q)
+		}
+		return err
+	})
+	sw.call("Sequence.LastValue(app.counter)", func(ctx context.Context) error {
+		q, err := db.SequenceByName(ctx, "app", "counter")
+		if err != nil {
+			return err
+		}
+		v, called, err := q.LastValue(ctx)
+		if err == nil && (v != -9 || !called) {
+			err = fmt.Errorf("%d, %v: want -9, the fifth value its cache stored", v, called)
+		}
+		return err
+	})
+	sw.call("Sequence.LastValue(app.seq)", func(ctx context.Context) error {
+		q, err := db.SequenceByName(ctx, "app", "seq")
+		if err != nil {
+			return err
+		}
+		v, called, err := q.LastValue(ctx)
+		if sw.role != "" {
+			if errors.Is(err, ErrDefinitionHidden) {
+				return nil
+			}
+			return fmt.Errorf("as a role without USAGE: %d, %v, %v; want ErrDefinitionHidden", v, called, err)
+		}
+		if err == nil && (v != 0 || called) {
+			err = fmt.Errorf("%d, %v: want none, never called", v, called)
+		}
+		return err
+	})
+}
+
+// sweepTriggers drives the trigger and event trigger reads with an
+// assertion on their rows: the database's triggers narrowed to app — the
+// table's and the view's — the by-name read of the view's, the view's own
+// listing, and the event trigger listed and read by name.
+func sweepTriggers(sw *sweep, db *Database) {
+	checkView := func(tr *Trigger) error {
+		if tr.OID == 0 || tr.Schema != "app" || tr.Table != "parent_names" || tr.TableKind != RelationView ||
+			tr.Name != "names_update" || tr.Timing != TriggerInsteadOf || !tr.ForEachRow ||
+			!slices.Equal(tr.Events, []TriggerEvent{TriggerUpdate}) || tr.Function != (ObjectName{"app", "touch"}) ||
+			!slices.Equal(tr.Arguments, []string{"a", ""}) || tr.Enabled != TriggerEnabledOrigin || tr.HasCondition ||
+			tr.Database() != db {
+			return fmt.Errorf("%+v: want app.parent_names' INSTEAD OF UPDATE row trigger running app.touch('a', '')", tr)
+		}
+		return nil
+	}
+	sw.call("Database.Triggers(app)", func(ctx context.Context) error {
+		ts, err := db.Triggers(ctx, ObjectFilter{Schema: []TextCriterion{{TextEquals, "app"}}})
+		if err != nil {
+			return err
+		}
+		if len(ts) != 2 || ts[0].Name != "child_touch" || ts[0].Table != "child" || ts[0].Arguments != nil {
+			return fmt.Errorf("%d triggers: want app.child's child_touch, then app.parent_names' names_update", len(ts))
+		}
+		return checkView(ts[1])
+	})
+	sw.call("Database.TriggerByName(app.parent_names.names_update)", func(ctx context.Context) error {
+		tr, err := db.TriggerByName(ctx, "app", "parent_names", "names_update")
+		if err != nil {
+			return err
+		}
+		return checkView(tr)
+	})
+	sw.call("View.Triggers(app.parent_names)", func(ctx context.Context) error {
+		v, err := db.ViewByName(ctx, "app", "parent_names")
+		if err != nil {
+			return err
+		}
+		ts, err := v.Triggers(ctx)
+		if err != nil {
+			return err
+		}
+		if len(ts) != 1 {
+			return fmt.Errorf("%d triggers, want names_update alone", len(ts))
+		}
+		return checkView(ts[0])
+	})
+	checkEvent := func(e *EventTrigger) error {
+		if e.OID == 0 || e.Name != "sweep_ddl" || e.Owner == "" || e.Origin != (Origin{}) || e.Event != EventTriggerDDLCommandEnd ||
+			e.Function != (ObjectName{"app", "on_ddl"}) || e.Enabled != TriggerEnabledOrigin ||
+			!slices.Equal(e.Tags, []string{"CREATE TABLE"}) || e.Comment != "sweep" || e.Database() != db {
+			return fmt.Errorf("%+v: want sweep_ddl on ddl_command_end for CREATE TABLE, commented", e)
+		}
+		return nil
+	}
+	sw.call("Database.EventTriggers(sweep_ddl)", func(ctx context.Context) error {
+		es, err := db.EventTriggers(ctx, ObjectFilter{Name: []TextCriterion{{TextEquals, "sweep_ddl"}}})
+		if err != nil {
+			return err
+		}
+		if len(es) != 1 {
+			return fmt.Errorf("%d event triggers, want sweep_ddl alone", len(es))
+		}
+		return checkEvent(es[0])
+	})
+	sw.call("Database.EventTriggerByName(sweep_ddl)", func(ctx context.Context) error {
+		e, err := db.EventTriggerByName(ctx, "sweep_ddl")
+		if err != nil {
+			return err
+		}
+		return checkEvent(e)
+	})
+}
+
+// sweepExtensions drives the extension reads with an assertion on their
+// rows: the installed listing narrowed to app (citext), plpgsql by name
+// (initdb's, so a system one), citext's members, and the available
+// listing and by-name read of the two extensions the fixture installed.
+func sweepExtensions(sw *sweep, db *Database) {
+	sw.call("Database.Extensions(app)", func(ctx context.Context) error {
+		es, err := db.Extensions(ctx, ObjectFilter{Schema: []TextCriterion{{TextEquals, "app"}}})
+		if err != nil {
+			return err
+		}
+		if len(es) != 1 {
+			return fmt.Errorf("%d extensions, want citext alone", len(es))
+		}
+		e := es[0]
+		if e.OID == 0 || e.Name != "citext" || e.Owner == "" || e.Origin != (Origin{}) || e.Schema != "app" ||
+			e.Version == "" || e.DefaultVersion != e.Version || !e.Relocatable || e.Requires != nil ||
+			e.ConfigTables != nil || e.Comment != "sweep" || e.Database() != db {
+			return fmt.Errorf("%+v: want citext in app at its default version, commented", e)
+		}
+		return nil
+	})
+	sw.call("Database.ExtensionByName(plpgsql)", func(ctx context.Context) error {
+		e, err := db.ExtensionByName(ctx, "plpgsql")
+		if err != nil {
+			return err
+		}
+		if !e.IsSystem || e.Schema != "pg_catalog" || e.Version != "1.0" || e.Relocatable || e.Comment == "" {
+			return fmt.Errorf("%+v: want initdb's plpgsql 1.0 in pg_catalog", e)
+		}
+		return nil
+	})
+	sw.call("Extension.Members(citext)", func(ctx context.Context) error {
+		e, err := db.ExtensionByName(ctx, "citext")
+		if err != nil {
+			return err
+		}
+		ms, err := e.Members(ctx)
+		if err != nil {
+			return err
+		}
+		if !slices.ContainsFunc(ms, func(m ExtensionMember) bool {
+			return m.Catalog == "pg_type" && m.Type == "type" && m.Identity == "app.citext" && m.OID != 0
+		}) {
+			return fmt.Errorf("%d members, none the type app.citext", len(ms))
+		}
+		return nil
+	})
+	checkAvailable := func(a *AvailableExtension, name string) error {
+		installed := slices.IndexFunc(a.Versions, func(v AvailableExtensionVersion) bool { return v.Installed })
+		if a.Name != name || a.DefaultVersion == "" || a.InstalledVersion == "" || a.Comment == "" || installed < 0 ||
+			a.Versions[installed].Version != a.InstalledVersion || a.Database() != db {
+			return fmt.Errorf("%+v: want %s installed at a version it lists", a, name)
+		}
+		return nil
+	}
+	sw.call("Database.AvailableExtensions(citext)", func(ctx context.Context) error {
+		as, err := db.AvailableExtensions(ctx, ObjectFilter{Name: []TextCriterion{{TextEquals, "citext"}}})
+		if err != nil {
+			return err
+		}
+		if len(as) != 1 {
+			return fmt.Errorf("%d available extensions, want citext alone", len(as))
+		}
+		return checkAvailable(as[0], "citext")
+	})
+	sw.call("Database.AvailableExtensionByName(postgres_fdw)", func(ctx context.Context) error {
+		a, err := db.AvailableExtensionByName(ctx, "postgres_fdw")
+		if err != nil {
+			return err
+		}
+		return checkAvailable(a, "postgres_fdw")
+	})
+}
+
+// sweepTypes drives the type and domain reads with an assertion on their
+// rows: both listings narrowed to app, a by-name read of every kind — enum,
+// composite, range, multirange, an extension's base type, pg_catalog's
+// int4 and a pseudo-type — the refusals of names that are no Type (an
+// implicit array, a domain, a table's row type), and both domains.
+func sweepTypes(sw *sweep, db *Database) {
+	sw.call("Database.Types(app)", func(ctx context.Context) error {
+		ts, err := db.Types(ctx, ObjectFilter{Schema: []TextCriterion{{TextEquals, "app"}}})
+		var names []string
+		for _, ty := range ts {
+			names = append(names, ty.Name)
+		}
+		if want := []string{"citext", "mood", "pair", "span", "spans"}; err == nil && !slices.Equal(names, want) {
+			err = fmt.Errorf("%q: want %q", names, want)
+		}
+		return err
+	})
+	for _, c := range []struct {
+		schema, name string
+		ok           func(*Type) bool
+	}{
+		{"app", "mood", func(ty *Type) bool {
+			return ty.Kind == TypeEnum && slices.Equal(ty.Labels, []string{"ok", "not ok"}) && ty.Comment == "sweep" &&
+				ty.Input == (ObjectName{"pg_catalog", "enum_in"}) && ty.PrivilegesDefault && len(ty.Privileges) == 2
+		}},
+		{"app", "pair", func(ty *Type) bool {
+			return ty.Kind == TypeComposite && reflect.DeepEqual(ty.Attributes, []TypeAttribute{
+				{Name: "a", TypeOID: 23, Type: "integer"}, {Name: "b", TypeOID: 25, Type: "text"}})
+		}},
+		{"app", "span", func(ty *Type) bool {
+			return ty.Kind == TypeRange && ty.Subtype == "integer" && ty.SubtypeOperatorClass == (ObjectName{"pg_catalog", "int4_ops"}) &&
+				ty.Multirange == (ObjectName{"app", "spans"}) && ty.Collation == (ObjectName{}) && ty.Canonical == (ObjectName{})
+		}},
+		{"app", "spans", func(ty *Type) bool { return ty.Kind == TypeMultirange && ty.Range == (ObjectName{"app", "span"}) }},
+		{"app", "citext", func(ty *Type) bool {
+			return ty.Kind == TypeBase && ty.Extension == "citext" && ty.Input == (ObjectName{"app", "citextin"}) &&
+				ty.InternalLength == -1 && ty.Collatable && ty.Category == TypeCategoryString
+		}},
+		{"pg_catalog", "int4", func(ty *Type) bool {
+			return ty.Kind == TypeBase && ty.IsSystem && ty.InternalLength == 4 && ty.PassedByValue && ty.Alignment == AlignInt4 &&
+				ty.Input == (ObjectName{"pg_catalog", "int4in"}) && ty.Category == TypeCategoryNumeric
+		}},
+		{"pg_catalog", "point", func(ty *Type) bool {
+			return ty.Kind == TypeBase && ty.Element == "double precision" && ty.Subscript == (ObjectName{"pg_catalog", "raw_array_subscript_handler"})
+		}},
+		{"pg_catalog", "anyelement", func(ty *Type) bool { return ty.Kind == TypePseudo && ty.Category == TypeCategoryPseudo }},
+	} {
+		sw.call("Database.TypeByName("+c.schema+"."+c.name+")", func(ctx context.Context) error {
+			ty, err := db.TypeByName(ctx, c.schema, c.name)
+			if err == nil && (ty.OID == 0 || ty.Owner == "" || !c.ok(ty)) {
+				err = fmt.Errorf("%+v: not the fixture's", ty)
+			}
+			return err
+		})
+	}
+	for _, name := range []string{"_mood", "code", "child"} {
+		sw.call("Database.TypeByName(app."+name+")", func(ctx context.Context) error {
+			if _, err := db.TypeByName(ctx, "app", name); !errors.Is(err, ErrNotFound) {
+				return fmt.Errorf("err = %v, want ErrNotFound: no Type", err)
+			}
+			return nil
+		})
+	}
+	sw.call("Database.Domains(app)", func(ctx context.Context) error {
+		ds, err := db.Domains(ctx, ObjectFilter{Schema: []TextCriterion{{TextEquals, "app"}}})
+		if err == nil && (len(ds) != 2 || ds[0].Name != "code" || ds[1].Name != "positive") {
+			err = fmt.Errorf("%d domains: want app.code, app.positive", len(ds))
+		}
+		return err
+	})
+	sw.call("Database.DomainByName(app.code)", func(ctx context.Context) error {
+		dm, err := db.DomainByName(ctx, "app", "code")
+		if err != nil {
+			return err
+		}
+		var want []DomainConstraint
+		if sw.srv.Version() >= 170000 {
+			want = []DomainConstraint{{Name: "code_not_null", Kind: ConstraintNotNull, Definition: "NOT NULL", Validated: true}}
+		}
+		if dm.OID == 0 || dm.Owner == "" || dm.BaseTypeOID != 1043 || dm.BaseType != "character varying(8)" || !dm.NotNull ||
+			dm.Default != "'x'::character varying" || dm.Collation != (ObjectName{"app", "sweep_c"}) ||
+			!reflect.DeepEqual(dm.Constraints, want) || dm.PrivilegesDefault {
+			return fmt.Errorf("%+v: want varchar(8) COLLATE app.sweep_c DEFAULT 'x' NOT NULL, granted", dm)
+		}
+		return nil
+	})
+	sw.call("Database.DomainByName(app.positive)", func(ctx context.Context) error {
+		dm, err := db.DomainByName(ctx, "app", "positive")
+		if err == nil && (dm.BaseType != "integer" || dm.NotNull || len(dm.Constraints) != 1 ||
+			dm.Constraints[0] != (DomainConstraint{Name: "positive_check", Kind: ConstraintCheck, Definition: "CHECK ((VALUE > 0))", Validated: true})) {
+			err = fmt.Errorf("%+v: want integer CHECK (VALUE > 0)", dm)
+		}
+		return err
+	})
+	sw.call("Database.DomainByName(app.mood)", func(ctx context.Context) error {
+		if _, err := db.DomainByName(ctx, "app", "mood"); !errors.Is(err, ErrNotFound) {
+			return fmt.Errorf("err = %v, want ErrNotFound: an enum is no domain", err)
+		}
+		return nil
+	})
+}
+
 // sweepRoutineFamilies drives the function, procedure and aggregate reads
 // with an assertion on their rows: the three listings narrowed to app, the
 // three by-name reads (the overloads both ways), both bodies, and the
@@ -666,8 +1017,14 @@ func sweepRoutineFamilies(sw *sweep, db *Database) {
 	app := ObjectFilter{Schema: []TextCriterion{{TextEquals, "app"}}, ExtensionMember: new(bool)}
 	sw.call("Database.Functions(app)", func(ctx context.Context) error {
 		fs, err := db.Functions(ctx, app)
-		if err == nil && (len(fs) != 3 || fs[0].Name != "f" || fs[1].Name != "f" || fs[2].Name != "touch") {
-			err = fmt.Errorf("%d functions: want app.f twice and app.touch", len(fs))
+		var names []string
+		for _, f := range fs {
+			names = append(names, f.Name)
+		}
+		// app.span's constructors (two) and app.spans' (three) beside them,
+		// and the trigger functions.
+		if want := []string{"f", "f", "on_ddl", "span", "span", "spans", "spans", "spans", "touch"}; err == nil && !slices.Equal(names, want) {
+			err = fmt.Errorf("%q: want app.f twice, app.on_ddl, the range's constructors and app.touch", names)
 		}
 		return err
 	})

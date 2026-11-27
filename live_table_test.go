@@ -348,14 +348,17 @@ func TestLiveTables(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, x := range trg {
-		x.OID = 0
+		if x.Database() != d {
+			t.Errorf("Triggers(child) %s: Database %v", x.Name, x.Database())
+		}
+		x.OID, x.db = 0, nil
 	}
 	touch := ObjectName{"app", "touch"}
 	wantTrg := []Trigger{
-		{Name: "t1", Definition: "CREATE TRIGGER t1 BEFORE INSERT OR UPDATE OF a, b ON app.child FOR EACH ROW WHEN ((new.a > 0)) EXECUTE FUNCTION app.touch()",
+		{Schema: "app", Table: "child", TableKind: RelationTable, HasCondition: true, Name: "t1", Definition: "CREATE TRIGGER t1 BEFORE INSERT OR UPDATE OF a, b ON app.child FOR EACH ROW WHEN ((new.a > 0)) EXECUTE FUNCTION app.touch()",
 			Timing: TriggerBefore, Events: []TriggerEvent{TriggerInsert, TriggerUpdate}, UpdateColumns: []string{"a", "b"},
 			ForEachRow: true, Function: touch, Enabled: TriggerEnabledReplica, Comment: "touch"},
-		{Name: "t2", Definition: "CREATE CONSTRAINT TRIGGER t2 AFTER DELETE ON app.child DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION app.touch()",
+		{Schema: "app", Table: "child", TableKind: RelationTable, Name: "t2", Definition: "CREATE CONSTRAINT TRIGGER t2 AFTER DELETE ON app.child DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION app.touch()",
 			Timing: TriggerAfter, Events: []TriggerEvent{TriggerDelete}, ForEachRow: true, Function: touch,
 			Enabled: TriggerEnabledOrigin, IsConstraint: true, Deferrable: true, InitiallyDeferred: true},
 	}

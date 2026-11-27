@@ -79,6 +79,8 @@ const (
 	catalogProc      catalogTable = "pg_catalog.pg_proc"      // functions, procedures, aggregates
 	catalogType      catalogTable = "pg_catalog.pg_type"      // types, domains
 	catalogNamespace catalogTable = "pg_catalog.pg_namespace" // schemas
+
+	catalogEventTrigger catalogTable = "pg_catalog.pg_event_trigger" // event triggers
 )
 
 // extensionMembership is the condition on pg_depend d that it is the row

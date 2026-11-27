@@ -36,9 +36,6 @@ var (
 		pgtype.BoolOID, pgtype.BoolOID, pgtype.BoolOID, pgtype.BoolOID, pgtype.BoolOID, pgtype.BoolOID,
 		pgtype.TextArrayOID, pgtype.TextArrayOID, pgtype.TextOID, pgtype.TextOID, pgtype.TextOID,
 		pgtype.TextArrayOID, pgtype.TextOID}
-	triggerTypes = []uint32{pgtype.OIDOID, pgtype.TextOID, pgtype.TextOID, pgtype.Int4OID, pgtype.TextArrayOID,
-		pgtype.TextOID, pgtype.TextOID, pgtype.TextOID, pgtype.BoolOID, pgtype.BoolOID, pgtype.BoolOID, pgtype.BoolOID,
-		pgtype.TextOID}
 	policyTypes = []uint32{pgtype.OIDOID, pgtype.TextOID, pgtype.TextOID, pgtype.BoolOID, pgtype.TextArrayOID,
 		pgtype.TextOID, pgtype.TextOID, pgtype.TextOID}
 	childTypes = []uint32{pgtype.OIDOID, pgtype.TextOID, pgtype.TextOID, pgtype.TextOID, pgtype.TextOID, pgtype.BoolOID}
@@ -408,52 +405,6 @@ func TestTableIndexes(t *testing.T) {
 		if !strings.Contains(last.Text, w) {
 			t.Errorf("no %q in\n%s", w, last.Text)
 		}
-	}
-}
-
-// Triggers: tgtype decoded into timing, events and level; the
-// foreign-key triggers the server made are not read.
-func TestTableTriggers(t *testing.T) {
-	_, other, tb := loadedTable(t, map[string]pgmotest.Responder{
-		"FROM pg_catalog.pg_trigger tg": rowsOf(triggerTypes,
-			// 1|2|4|16: ROW BEFORE INSERT UPDATE.
-			[]any{uint32(60001), "t1", "CREATE TRIGGER t1 …", int32(23), []string{"a", "b"}, "app", "touch", "R",
-				false, false, false, true, "t"},
-			// 8|32|64: INSTEAD OF DELETE TRUNCATE, per statement.
-			[]any{uint32(60002), "t2", "CREATE CONSTRAINT TRIGGER t2 …", int32(104), []string{}, "Other", "f g", "D",
-				true, true, true, false, ""},
-			// 4: AFTER INSERT, per statement.
-			[]any{uint32(60003), "t3", "CREATE TRIGGER t3 …", int32(4), nil, "app", "touch", "A",
-				false, false, false, false, ""}),
-	})
-	ts, err := tb.Triggers(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []pgmo.Trigger{
-		{OID: 60001, Name: "t1", Definition: "CREATE TRIGGER t1 …", Timing: pgmo.TriggerBefore,
-			Events: []pgmo.TriggerEvent{pgmo.TriggerInsert, pgmo.TriggerUpdate}, UpdateColumns: []string{"a", "b"}, ForEachRow: true,
-			Function: pgmo.ObjectName{Schema: "app", Name: "touch"}, Enabled: pgmo.TriggerEnabledReplica, Inherited: true, Comment: "t"},
-		{OID: 60002, Name: "t2", Definition: "CREATE CONSTRAINT TRIGGER t2 …", Timing: pgmo.TriggerInsteadOf,
-			Events:   []pgmo.TriggerEvent{pgmo.TriggerDelete, pgmo.TriggerTruncate},
-			Function: pgmo.ObjectName{Schema: "Other", Name: "f g"}, Enabled: pgmo.TriggerDisabled,
-			IsConstraint: true, Deferrable: true, InitiallyDeferred: true},
-		{OID: 60003, Name: "t3", Definition: "CREATE TRIGGER t3 …", Timing: pgmo.TriggerAfter,
-			Events: []pgmo.TriggerEvent{pgmo.TriggerInsert}, Function: pgmo.ObjectName{Schema: "app", Name: "touch"},
-			Enabled: pgmo.TriggerEnabledAlways},
-	}
-	for i := range want {
-		if i >= len(ts) || !reflect.DeepEqual(*ts[i], want[i]) {
-			t.Errorf("Triggers[%d] =\n%+v\nwant\n%+v", i, ts, want[i])
-		}
-	}
-	if n := reflect.TypeFor[pgmo.Trigger]().NumField(); n != 14 {
-		t.Errorf("Trigger has %d fields; this test checks 14 — add the new one", n)
-	}
-	last := lastQuery(other)
-	if !strings.Contains(last.Text, "WHERE tg.tgrelid = $1 AND NOT tg.tgisinternal\nORDER BY tg.tgname") ||
-		!strings.Contains(last.Text, "pg_catalog.pg_get_triggerdef(tg.oid)") {
-		t.Errorf("internal triggers read, or the pretty form:\n%s", last.Text)
 	}
 }
 

@@ -122,16 +122,8 @@ type Column struct {
 }
 
 // columnTypeName is the text expression naming the type of the column a,
-// with its modifier: format_type's own text for a type in pg_catalog (whose
-// arrays it spells elem[]), and for any other type that text qualified by
-// the type's schema — an array type is always in its element type's, ALTER
-// TYPE … SET SCHEMA moving both — unless format_type already qualified it, as it does when the session's
-// search_path does not find the type. A type name holding a dot is quoted,
-// so the text cannot start with the schema's quoted name and a dot unless it
-// was qualified.
-const columnTypeName = `CASE WHEN tn.nspname = 'pg_catalog'
-			OR pg_catalog.starts_with(ft.name, pg_catalog.quote_ident(tn.nspname) || '.') THEN ft.name
-		ELSE pg_catalog.quote_ident(tn.nspname) || '.' || ft.name END`
+// with its modifier (typeNameWithModifier).
+var columnTypeName = typeNameWithModifier("tn", "ft")
 
 // columnsQuery reads the columns of the table $1 in attnum order.
 var columnsQuery = `SELECT a.attnum::integer, a.attname::pg_catalog.text, a.atttypid,

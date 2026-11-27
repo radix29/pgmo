@@ -1164,7 +1164,7 @@ none:
 | `Columns` → `[]*Column` | `pg_attribute` (`attnum > 0`, not dropped) + `pg_attrdef`, `pg_type`, `pg_collation`, `attacl` | `Type` is `format_type(atttypid, atttypmod)` for a `pg_catalog` type and schema-qualified otherwise (the element's schema for an array), whatever the path; `Default` vs `GenerationExpression` split on `attgenerated` (`v`, virtual, 18+); `Collation` only when not the type's own (psql's rule); `StatisticsTarget` `COALESCE(attstattarget, -1)` — the column is `int4` on 15–16 and a nullable `int2` from 17, the same read on both; `IsLocal`/`InheritCount`; the column ACL with no default (NULL is none) |
 | `Constraints` → `[]*Constraint` | `pg_constraint` (`contype <> 't'`) | `pg_get_constraintdef`; `conkey`/`confkey` named in key order; `Enforced` is `conenforced` from 18 and `true` before (`colSince`, golden `constraint.sql`); 18's NOT NULL rows (`contype 'n'`) are listed; `Index` for `p`/`u`/`x`; FK actions and match type as `ForeignKeyAction`/`ForeignKeyMatch`, empty for other kinds |
 | `Indexes` → `[]*Index` | `pg_index` + `pg_class`, `pg_am`, `pg_constraint`, `pg_tablespace` | `pg_get_indexdef` (table always qualified); `KeyColumns`/`IncludedColumns` per column from `pg_get_indexdef(oid, k, true)` over `indnkeyatts`/`indnatts`; `Predicate`; `Valid`; `NullsNotDistinct` (15); `Constraint` it enforces |
-| `Triggers` → `[]*Trigger` | `pg_trigger` (`NOT tgisinternal`) + `pg_proc` | `pg_get_triggerdef(oid)` (non-pretty: table qualified); `tgtype` decoded into `Timing`, `Events` (server order), `ForEachRow`; `UpdateColumns` from `tgattr`; `Enabled` (`O`/`R`/`A`/`D`); constraint-trigger flags; `Inherited` = `tgparentid <> 0` |
+| `Triggers` → `[]*Trigger` | `pg_trigger` (`NOT tgisinternal`) + `pg_proc` | the trigger family's read keyed by the table's OID (§ Triggers and event triggers) |
 | `Policies` → `[]*Policy` | `pg_policy` | `Command`, `Permissive`, `Roles` in stored order (PUBLIC `""`), `Using`/`WithCheck` |
 | `Children` → `[]ChildTable` | `pg_inherits` (`inhparent = oid`) | direct only; `Kind` may be a foreign table; `PartitionBound`, `DetachPending` |
 | `Size` → `TableSize` | `pg_table_size`, `pg_indexes_size`, `pg_total_relation_size` | on demand (stats files); any role may call them; 0 for a partitioned table; a dropped table is `ErrNotFound` |
@@ -1254,6 +1254,318 @@ table's parameters, and a populated, analyzed one with a unique index; the
 definition under two paths; each by-name read refusing the other kinds;
 every Ref refused; and both listings with their parts read again as a
 plain role, identical.
+
+### Sequences (`sequence.go`)
+
+Landed P4.7 (reads; the writes are P4.13.3). `Database.Sequences` /
+`SequenceByName` / `SequenceRef` (`pg_class` kind `S` joined to
+`pg_sequence`), with `Database()`, `QualifiedName()` and the derived
+`IsOwned()`. What the `pg_sequences` view shows, read from the catalogs
+beneath it, plus what it leaves out. Through **`s.onDatabase`**, one
+statement; the extension, the owning column and the comment are joins
+(`originJoin`, `pg_description`), not a subquery per row — the estimate
+over 3,000 sequences is ~1.2 k, 0.15 s on pg15 and pg18. The ACL is an
+`aclLateral` over `acldefault('s', …)`. A by-name read finds a sequence
+alone (a table or view of the name is `ErrNotFound`); an empty schema is
+`ErrSchemaRequired`. The listing takes `relationFilterColumns`; every
+session's temporary sequences are `IsSystem` (`pg_temp_N`), and another
+session's are listed, as `Tables` lists its temporary tables.
+
+| Field | Source |
+|---|---|
+| `Origin`, `OID`, `Schema`, `Name`, `Owner` | as `Table` |
+| `Persistence` | `relpersistence` (`Persistence`, shared with `Table`) |
+| `DataType` | `format_type(seqtypid, NULL)`: `smallint`, `integer`, `bigint` — always `pg_catalog`'s |
+| `Start`, `Increment`, `MinValue`, `MaxValue`, `Cache`, `Cycle` | `pg_sequence`; the bounds are stored even for `NO MINVALUE`/`NO MAXVALUE`; every value fits an `int64` (no decimal sequences, unlike SQL Server) |
+| `OwnedBy`, `OwnedByColumn`, `Identity` | the sequence's one `pg_depend` row on a `pg_class` column, deptype `'a'` (OWNED BY, serial) or `'i'` (identity); checked on pg15/pg18 that a sequence has no other dependency on a relation |
+| `Privileges`, `PrivilegesDefault`, `Comment` | as `Table`, the default `acldefault('s')` (the owner's SELECT, UPDATE, USAGE) |
+
+**The last value is read on demand, not listed**: `Sequence.LastValue(ctx)
+(value, called, err)`, keyed by the OID (a Ref is `ErrHandleNotLoaded`, a
+dropped sequence `ErrNotFound`). `pg_sequence_last_value` opens the
+sequence and answers differently by version — found on the lab: without
+SELECT or USAGE, pg15 raises 42501 where pg18 answers NULL; for another
+session's temporary sequence both answer NULL; NULL also means "not called
+since CREATE / RESTART / `setval(…, false)`". So `pg_sequences.last_value`
+cannot tell the cases apart, and a listing carrying it would differ by role.
+The read asks the three questions first (`has_sequence_privilege(…,
+'SELECT,USAGE')`, `pg_is_other_temp_schema`, unlogged in recovery) and
+calls the function only past them: no privilege →
+`unsupportedf(…, ErrDefinitionHidden)`; another session's temporary, or an
+unlogged sequence on a standby → `ErrUnsupported`; NULL → `called` false.
+The value is the one stored in the sequence, which a session's `CACHE`
+runs ahead of: one `nextval` under `CACHE 5` stores the fifth value.
+
+Tests: `sequence_test.go` (pgmotest: every field from its own column with a
+field-count guard; names bound as `$1`/`$2`, routed to the sequence's
+database; each join's exact fragment; the filter's exact tail;
+`ErrSchemaRequired`, not found, server errors and a short ACL wrapped once;
+the Ref refused before sending; `LastValue` keyed by the OID with each
+guard's fragment, and each case of its row: called, never called, no
+privilege, another session's temporary, unlogged on a standby, dropped, a
+server error). Live, `TestLiveSequences` on pg15–pg18: defaults, a
+descending smallint `CYCLE` with bounds and `CACHE`, a serial, an identity
+and an OWNED BY column (checked against `pg_get_serial_sequence`), unlogged,
+a case-only name, an extension member, another session's temporary
+sequence; grants WITH GRANT OPTION and to PUBLIC and a never-set ACL; every
+listed sequence equal to `pg_sequences`' row; the last value through
+`nextval`, `setval` both ways and `RESTART`; each refusal; and the listing
+read again as a plain role, identical, its last values following its
+privileges. 14 mutations, all caught offline; live, 11 — of the other
+three, the unlogged-on-a-standby guard needs a standby the lab lacks, and
+the SQL's other-temp guard is equivalent on 15–18 (the function answers
+NULL there and the Go check refuses it).
+
+### Types and domains (`type.go`, `domain.go`)
+
+Landed P4.8 (reads; the writes are P4.13.3). Two types, as two statements
+and two OE folders (Types, Domains), both from `pg_type` through
+**`s.onDatabase`**, sharing `typeFilterColumns` (`t.typname`, `n.nspname`,
+the system schema, `isExtensionMember(catalogType, …)`). A by-name read
+finds its own family alone; an empty schema is `ErrSchemaRequired`; a Ref
+holds the names.
+
+**`Type`** (`Database.Types` / `TypeByName` / `TypeRef`) is every kind but
+a domain: `Kind` (`TypeKind`: base, composite, enum, pseudo, range,
+multirange). Left out, as psql's `\dT` does, because each is part of
+another object: the array the server makes beside every type (`_name`, its
+element's `typarray`, tested on the `te` join `typeJoins` already makes for
+`Element`) and a relation's row type (`typrelid` of a relkind other than
+`c`). A multirange is listed — a column can be declared with it and CREATE
+TYPE … AS RANGE names it — though it is created and dropped with its range.
+Checked on the lab: every `pg_type` row is a listed Type, a domain, an
+implicit array or a row type (`TestLiveTypes` counts them).
+
+| Field | Source |
+|---|---|
+| `Origin`, `OID`, `Schema`, `Name`, `Owner` | as `Table`, the origin over `catalogType` |
+| `Kind`, `Category`, `Preferred`, `Shell` | `typtype`, `typcategory` (`TypeCategory`, the documentation's names), `typispreferred`, `NOT typisdefined` (a shell type, `CREATE TYPE name;`, stored as a pseudo-type) |
+| `Input` … `Subscript` | the eight `regproc` columns as `ObjectName`s (`procedureJoin`); every type has an input and output function, CREATE TYPE names them for a base type alone |
+| `InternalLength`, `PassedByValue`, `Alignment`, `Storage`, `Delimiter` | `typlen` (-1 varlena, -2 cstring), `typbyval`, `typalign` (`TypeAlignment`), `typstorage` (`StorageKind`, shared with `Column`), `typdelim` |
+| `Element` | `typelem` by `typeName` — a base type's ELEMENT (point's `double precision`); never an implicit array's, those are not listed |
+| `Default`, `HasDefault`, `Collatable` | `typdefault` (an empty literal is a default), `typcollation <> 0` |
+| `Labels` | `pg_enum` by `enumsortorder` — not creation order once `ADD VALUE BEFORE/AFTER` ran |
+| `Attributes` | the composite relation's live `pg_attribute` rows: name, type OID, `typeNameWithModifier`, a collation only when not the type's own |
+| `Subtype`, `SubtypeOperatorClass`, `Collation`, `Canonical`, `SubtypeDiff`, `Multirange` | `pg_range` on `rngtypid`; the operator class is stored even when defaulted |
+| `Range` | `pg_range` on `rngmultitypid`: a multirange's range |
+| `Privileges`, `PrivilegesDefault`, `Comment` | `typacl` over `acldefault('T')` (PUBLIC's USAGE and the owner's); `pg_description` |
+
+Each kind's children are one grouped read joined by OID — `typeEnumLabels`
+over `pg_enum`, `typeAttributes` over the composite relations' attributes —
+not a subquery per type (§ Routines). The listing of pg_catalog's 107 types
+is estimated at ~1.3 k (far under `jit_above_cost`), ~40 ms to run and ~65
+ms to plan its ~50 joined relations on pg15 and pg18.
+
+**`Domain`** (`Database.Domains` / `DomainByName` / `DomainRef`), `typtype
+'d'`: `BaseTypeOID`/`BaseType` (`format_type(typbasetype, typtypmod)`
+qualified by `typeNameWithModifier` — the shared form of `columnTypeName`,
+so `varchar(10)` keeps its modifier and a user type its schema whatever the
+path); `NotNull` (`typnotnull`); `Default` (`pg_get_expr(typdefaultbin,
+0)`, as pg_dump, so a renamed object is named as it is now — rendered under
+the session's `search_path`, like every expression); `Collation` only when
+it differs from the base type's (a domain over a domain inherits it);
+`Constraints []DomainConstraint{Name, Kind, Definition, Validated}` from
+`pg_constraint` on `contypid`, one grouped read, by name; ACL and comment as
+`Type`. **Found on the lab: from 17 a domain's NOT NULL is also a named
+`pg_constraint` row** (contype `'n'`, `d_not_null` unless `CONSTRAINT name
+NOT NULL` named it — the name given is lost on 15 and 16), so
+`Constraints` holds it there beside the CHECKs while `NotNull` reads alike on
+every release. A domain over a domain has no constraints of its own; the
+base's apply. No gate: the catalogs' columns are identical on 15–18.
+
+Tests: `type_test.go`, `domain_test.go` (pgmotest: every field from its own
+column with a field-count guard; names bound as `$1`/`$2`, routed to the
+type's database; each join's and grouped read's exact fragment; the
+filter's exact tail; `ErrSchemaRequired`, not found, server errors, short
+attribute / constraint arrays and ACLs wrapped once; the Refs; every
+`String()`). Live, `TestLiveTypes` and `TestLiveDomains` on pg15–pg18 —
+enums in sort order, empty enum and composite, a dropped attribute,
+attribute collations and modifiers, ranges with a diff function, a
+collation and a named multirange, citext's base type, pg_catalog's
+`int4range`/`point`/`box`/`varchar`/`text`/`anyelement`; what is no Type
+refused; every `pg_type` row accounted for; domains with collation,
+default, NOT NULL (the 17+ rows), a NOT VALID CHECK, over a domain, over an
+enum array; information_schema's as system; a case-only name; grants; the
+listings read again under a `search_path` holding `app` and as a plain
+role, identical. Sweep: `Type`/`Domain` swept types, `sweepTypes`.
+
+### Triggers and event triggers (`trigger.go`, `event_trigger.go`)
+
+Landed P4.9 (reads; the writes are P4.13.3). Two families, as SQL Server's
+DML and DDL triggers are (gosmo's `Trigger` and `DatabaseTrigger`).
+
+**Triggers** were a table's part from P4.4; P4.9 made them a family of the
+database: `Database.Triggers(ctx, ObjectFilter)` (every relation kind that
+takes one — table, partitioned table, view, foreign table),
+`TriggerByName(ctx, schema, table, name)`, `TriggerRef(schema, table,
+name)`, and the per-relation reads `Table.Triggers` and `View.Triggers` —
+one select (`triggerSelect`), narrowed by `tgrelid` for a relation. A
+trigger has **no schema of its own**: its name is unique on its relation,
+and DDL names it `name ON schema.relation`, so it is addressed by three
+names and `Trigger.QualifiedTable()` gives the relation. Its `Origin` is
+the relation's (a trigger is created, dumped and dropped with it; `ALTER
+EXTENSION … ADD` takes no TRIGGER), and the filter's Schema/System/
+ExtensionMember are the relation's too; Name is the trigger's. Internal
+triggers (`tgisinternal`, a foreign key's) are never read — by name either.
+
+| Field | Source |
+|---|---|
+| `Origin`, `Schema`, `Table`, `TableKind` | the relation's `pg_class` row (`originJoin`), `relkind` |
+| `OID`, `Name`, `Definition` | `pg_get_triggerdef(oid)` (non-pretty: table qualified) |
+| `Timing`, `Events`, `ForEachRow` | `tgtype` decoded (server order) |
+| `UpdateColumns` | `tgattr` named in the order given (`UPDATE OF b, a` stays `b, a`) |
+| `Function` | `tgfoid`; a trigger function takes no arguments, so `FunctionByName(…, []OID{})` finds it |
+| `Arguments` | `tgargs`, split server-side (below) |
+| `Enabled`, constraint flags, `Inherited` | `tgenabled`, `tgconstraint`/`tgdeferrable`/`tginitdeferred`, `tgparentid <> 0` |
+| `OldTable`, `NewTable` | `tgoldtable`, `tgnewtable` (REFERENCING) |
+| `HasCondition` | `tgqual IS NOT NULL`; the text is in `Definition` alone — `pg_get_expr(tgqual, tgrelid)` refuses it ("expression contains variables of more than one relation", pg15 and pg18) |
+| `Comment` | `pg_description` join |
+
+**Arguments.** `tgargs` is a `bytea` of each argument's bytes in the
+database's encoding, each followed by a NUL (`convert_from` refuses it
+whole: a NUL is no character). It is split as text: `encode(…, 'escape')`
+writes a NUL as `\000`, a backslash as `\\` and a high byte as `\ooo`;
+every `\\` is rewritten `\134` (the same byte), so every backslash left
+starts a three-digit escape and `\000` is found only where a NUL was; each
+piece is `decode`d and `convert_from` the database's encoding, so the
+server converts it to the client's as any text. Checked on the lab against
+an independent split in Go of the raw bytes, with a quote, an empty
+argument, `a\000b`, multibyte text, a LATIN1 database, and
+`standard_conforming_strings` off (the literals are `E''`). The first form
+split with `generate_series` over the bytes: the planner prices each call
+at 15, ~52 k over 3,000 triggers — 6,000 would cross `jit_above_cost`. As
+`unnest` the estimate over 6,000 is ~5–6 k (0.5 s through psql on pg15
+and pg18); a relation's read pushes `tgrelid` into both grouped
+joins (keyed `(oid, tgrelid)`), cost ~100, 6 ms.
+
+**`Definition` follows the session** twice over: its names the
+`search_path` (§ Tables), and its argument literals
+`standard_conforming_strings` — off, `'a\000b'` is rendered `'a\\000b'`
+(found on the lab; pinned by `TestLiveTriggers`). `Arguments` do not.
+
+**Event triggers**: `Database.EventTriggers(ctx, ObjectFilter)`,
+`EventTriggerByName(ctx, name)`, `EventTriggerRef(name)`, from
+`pg_event_trigger` through the database's own pool (one statement;
+extension and comment are joins). An event trigger has no schema
+(`QualifiedName()` is the quoted name; a Schema criterion is ignored);
+`pg_event_trigger` is readable by every role, so the listing is the same
+for all. Fields: `Origin` (`IsSystem` = `oid < 16384`, the rule for a
+schema-less object — no built-in row exists; `Extension` by `pg_depend` on
+the new `catalogEventTrigger`, set by `ALTER EXTENSION … ADD EVENT
+TRIGGER`), `OID`, `Name`, `Owner`, `Event` (`EventTriggerEvent`:
+`ddl_command_start`, `ddl_command_end`, `sql_drop`, `table_rewrite`,
+`login` — 17+, refused by 15–16's parser, a value not a column so no
+gate), `Function`, `Enabled` (`TriggerEnabled`, shared), `Tags` (`evttags`
+as stored — upper case — nil for every command), `Comment`. Checked on the
+lab first: `pg_trigger` and `pg_event_trigger` identical on pg15–pg18.
+
+Tests: `trigger_test.go` (pgmotest: every field of three triggers — on a
+system-schema extension member's table, a view, a foreign table — with a
+field-count guard; each join's exact fragment; the per-table and per-view
+reads keyed by the OID; the listing's filter tail and order; by-name names
+bound as `$1`–`$3`, `ErrSchemaRequired`, not found, server errors wrapped
+once; the Ref), `event_trigger_test.go` (likewise; a Schema criterion
+pushes nothing). Live, `TestLiveTriggers` on pg15–pg18: UPDATE OF out of
+table order with WHEN and REPLICA, arguments as above, transition tables,
+DISABLE, a comment, a case-only name, a foreign key's triggers left out
+(by name too), a constraint trigger, a view's INSTEAD OF and statement
+triggers, a partition's inherited one, a foreign table's, an extension
+member table's; every non-internal `pg_trigger` row listed once; filters;
+the listing again under `standard_conforming_strings` off and as a plain
+role; a LATIN1 database. `TestLiveEventTriggers`: every event (login on
+17+), tags, ENABLE ALWAYS/DISABLE, an extension member, a case-only name,
+matched to `pg_event_trigger` row for row, identical as a plain role, none
+seen from another database. 25 mutations, all caught (4 live only; UPDATE
+OF's order after the fixture put its columns out of table order).
+
+### Extensions (`extension.go`)
+
+Landed P4.10 (reads; the writes — CREATE, ALTER … UPDATE / SET SCHEMA,
+DROP — are P4.13.3). SQL Server has no counterpart. Three reads, all
+through the database's own pool and the same for every role
+(`pg_extension` is readable by all; `pg_available_extensions()` and
+`pg_available_extension_versions()` are executable by PUBLIC — checked on
+pg15 and pg18):
+
+- **Installed**: `Database.Extensions(ctx, ObjectFilter)`,
+  `ExtensionByName(ctx, name)`, `ExtensionRef(name)`. An extension has no
+  schema of its own (its name is the database's; `QualifiedName()` is the
+  quoted name), but `Schema` is where its objects are, and the filter's
+  Schema criterion matches it. `Origin.IsSystem` is the schema-less rule,
+  `oid < 16384` — plpgsql alone, which initdb installs; `Origin.Extension`
+  is always empty (`ALTER EXTENSION … ADD` takes no extension), so
+  `ExtensionMember: true` keeps none (the filter column is `false`).
+- **Members**: `Extension.Members(ctx)` → `[]ExtensionMember`, keyed by the
+  OID (a Ref → `ErrHandleNotLoaded`), by type then identity.
+- **Available**: `Database.AvailableExtensions(ctx, ObjectFilter)` (Name
+  only) and `AvailableExtensionByName(ctx, name)`, one row per version of
+  the two views joined, grouped in Go. They read the server's extension
+  directory, so they are the same in every database but for
+  `InstalledVersion` / `Installed`, which are the database read's — hence
+  a Database method, not a Server one.
+
+| Field | Source |
+|---|---|
+| `Origin`, `OID`, `Name`, `Owner` | `oid < 16384`; `extname`; `pg_get_userbyid(extowner)` |
+| `Schema`, `Version`, `Relocatable` | `extnamespace`, `extversion`, `extrelocatable` |
+| `DefaultVersion` | `pg_available_extensions()` joined by name (the function, not its view, which joins `pg_extension` again); empty when the control file is gone |
+| `Requires` | `pg_depend` deptype `'n'` from the extension to another, grouped by name |
+| `ConfigTables` | `extconfig` × `extcondition` by `ROWS FROM (unnest(…), unnest(…)) WITH ORDINALITY`, in marking order (pg_dump's); a sequence has no condition |
+| `Comment` | `pg_description` join |
+| `ExtensionMember` | `pg_depend` deptype `'e'` to the extension: `Catalog` (`classid`'s relname), `OID` (`objid`), `Type` and `Identity` from `pg_identify_object` |
+| `AvailableExtension` | `pg_available_extensions`: `name`, `default_version`, `installed_version`, `comment` |
+| `AvailableExtensionVersion` | `pg_available_extension_versions`: every column but the name |
+
+**Members are named, not read.** An extension can own any kind of object
+— casts, operator classes, languages, schemas, foreign data wrappers —
+most of which pgmo has no family for yet, so a member is its catalog and
+OID (the key a family's read takes) and `pg_identify_object`'s identity:
+schema-qualified and quoted whatever the `search_path`, routines and
+operators with their argument types, `(source AS target)` for a cast,
+`… USING method` for an operator class — what `ALTER EXTENSION … DROP
+<type>` takes. Its `schema` and `name` columns are **not** read: they come
+back quoted (`"E s"`), so they are no stored names (found on pg15 and
+pg18); `pg_identify_object_as_address`'s `object_names` quote a type's
+name and nothing else's. **From 17 an extension type's implicit array is a
+member too** (`"E s".earth[]`; 15–16 record no array — found on the lab,
+pinned by `TestLiveExtensions`).
+
+**Versions are opaque to PostgreSQL** — names related only by the update
+scripts there are — and `pg_available_extension_versions()` returns them
+in directory order (pg18 gave citext's as 1.8, 1.4, 1.6, 1.7, 1.5). An
+`AvailableExtension`'s versions are sorted in Go by
+`compareExtensionVersions`, a reading aid: runs of digits compared as
+numbers (1.9 before 1.10), other runs as bytes, a number before text at
+the same place, a prefix first (1.4 before 1.4-1); total, equal only for
+equal strings.
+
+`ConfigTables` cannot be set by a fixture — `pg_extension_config_dump`
+runs only inside an extension's script — so `TestLiveExtensions` checks
+them against the connected database's `pg_cron` when it has one (the lab's
+does: `cron.job`, `cron.jobid_seq`, `cron.job_run_details`,
+`cron.runid_seq`). The listing's cost is ~51 on pg15 and pg18 (an
+extension list is short; the configuration grouping is the largest part).
+
+Tests: `extension_test.go` (pgmotest: every field of two extensions — one
+with every array NULL — with field-count guards; each join's exact
+fragment; the filter tail, `ExtensionMember: true` as `AND false`;
+misaligned configuration arrays refused; by-name bound as `$1`, not found,
+server errors wrapped once; the Ref; members keyed by the OID with a Ref
+refused before sending; the available rows grouped, versions sorted, an
+extension with no version, the Name criterion alone pushed down;
+`compareExtensionVersions` over every pair of an ordered list). Live,
+`TestLiveExtensions` on pg15–pg18: plpgsql, cube and earthdistance (which
+requires it) in `"E s"`, citext at 1.5 below the default, commented,
+holding a table and a function `ALTER EXTENSION … ADD` gave it; the
+listing matched to `pg_extension` and each default to
+`pg_available_extensions`; filters; members matched to `pg_depend` +
+`pg_identify_object`, identical under a `search_path` holding `"E s"`;
+the available listing matched to both views; a plain role identical;
+another database with plpgsql alone and citext not installed; a dropped
+extension with no members; `pg_cron`'s configuration tables. 30
+mutations: 29 caught (all offline; grouping by name only after the
+fixture gave two neighbours one comment), 1 equivalent (an empty
+`Requires` set to nil: `array_agg` never gives one; removed).
 
 ### Routines: functions, procedures, aggregates (`routine.go`)
 
@@ -1427,6 +1739,21 @@ role, 0 failed, on pg15–pg18.
 read by name, are swept reflectively, and `sweepViews` drives both listings
 narrowed to `app`, both by-name reads and each part read, asserting their
 rows. Result: 64 calls per role, 0 failed, on pg15–pg18.
+
+`Trigger` and `EventTrigger` are swept types (P4.9; no context method of
+their own yet): `app.parent_names`' INSTEAD OF trigger `names_update`
+(with arguments) and the commented event trigger `sweep_ddl`, read by name.
+`sweepTriggers` drives the database's triggers narrowed to `app`, both
+by-name reads, `View.Triggers` (the read `Table.Triggers` shares,
+`relationTriggers`) and the event trigger listing, asserting their rows.
+Result: 111 calls per role, 0 failed, on pg15–pg18.
+
+`Extension` is a swept type (P4.10): the fixture's citext (commented), read
+by name, has its `Members` swept reflectively, as are both database
+listings. `sweepExtensions` drives the installed listing narrowed to `app`,
+plpgsql by name (the system one), citext's members, and the available
+listing and by-name read of citext and postgres_fdw, asserting their rows.
+Result: 119 calls per role, 0 failed, on pg15–pg18.
 
 ## Feature map
 

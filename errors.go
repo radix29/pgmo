@@ -80,12 +80,13 @@ var ErrUnsupportedVersion = errors.New("unsupported server version")
 // pgmo simply has no form for the request.
 var ErrUnsupported = errors.New("not supported")
 
-// ErrDefinitionHidden reports a script refused because the connected role
-// cannot see a definition it needs. PostgreSQL's catalogs are mostly
+// ErrDefinitionHidden reports a script or read refused because the
+// connected role cannot see a definition or value it needs. PostgreSQL's catalogs are mostly
 // readable by every role, but not all of them: pg_subscription.subconninfo
 // is readable only by superusers, and pg_user_mappings answers NULL options
 // unless the role is the mapped user with USAGE on the server, a member of
-// the server's owner, or a superuser.
+// the server's owner, or a superuser. A sequence's last value needs SELECT
+// or USAGE on it (Sequence.LastValue).
 // Every such refusal also wraps ErrUnsupported, so it is a permission gap a
 // caller can name, not a different kind of refusal.
 var ErrDefinitionHidden = errors.New("definition not visible to the role")

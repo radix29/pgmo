@@ -52,7 +52,17 @@ Module `github.com/radix29/pgmo`, MIT.
   `view.go`; the routine reads `Functions`, `FunctionByName`,
   `FunctionRef`, `Procedures`, `ProcedureByName`, `ProcedureRef`,
   `Aggregates`, `AggregateByName`, `AggregateRef`, `RoutineByName` and the
-  bodies `Function.Body`, `Procedure.Body` in `routine.go`).
+  bodies `Function.Body`, `Procedure.Body` in `routine.go`; the sequence
+  reads `Sequences`, `SequenceByName`, `SequenceRef` and
+  `Sequence.LastValue` in `sequence.go`; the type reads `Types`,
+  `TypeByName`, `TypeRef` in `type.go` and the domain reads `Domains`,
+  `DomainByName`, `DomainRef` in `domain.go`; the trigger reads
+  `Triggers`, `TriggerByName`, `TriggerRef` and `View.Triggers` in
+  `trigger.go` and the event trigger reads `EventTriggers`,
+  `EventTriggerByName`, `EventTriggerRef` in `event_trigger.go`; the
+  extension reads `Extensions`, `ExtensionByName`, `ExtensionRef`,
+  `Extension.Members`, `AvailableExtensions`, `AvailableExtensionByName`
+  in `extension.go`).
   The plan for pgmo *and* pgMS is
   `~/go/pgms/docs/PLAN.md` (`docs/PLAN.md` here points to it); pgmo owns
   phases P1–P6 and shares P14–P16.

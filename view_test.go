@@ -287,6 +287,7 @@ func TestViewRefs(t *testing.T) {
 	ctx := t.Context()
 	for name, read := range map[string]func() error{
 		"View.Columns":             func() error { _, err := v.Columns(ctx); return err },
+		"View.Triggers":            func() error { _, err := v.Triggers(ctx); return err },
 		"MaterializedView.Columns": func() error { _, err := m.Columns(ctx); return err },
 		"MaterializedView.Indexes": func() error { _, err := m.Indexes(ctx); return err },
 		"MaterializedView.Size":    func() error { _, err := m.Size(ctx); return err },
@@ -317,6 +318,11 @@ func TestViewPartReadsRouteAndWrap(t *testing.T) {
 		{"View.Columns", "FROM pg_catalog.pg_attribute a", "list columns of view app.names", 31001,
 			func(ctx context.Context, v *pgmo.View, _ *pgmo.MaterializedView) error {
 				_, err := v.Columns(ctx)
+				return err
+			}},
+		{"View.Triggers", "FROM pg_catalog.pg_trigger tg", "list triggers of view app.names", 31001,
+			func(ctx context.Context, v *pgmo.View, _ *pgmo.MaterializedView) error {
+				_, err := v.Triggers(ctx)
 				return err
 			}},
 		{"MaterializedView.Columns", "FROM pg_catalog.pg_attribute a", "list columns of materialized view app.totals", 32001,

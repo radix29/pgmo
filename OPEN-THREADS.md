@@ -193,11 +193,13 @@ write a zero-argument aggregate as `AGGREGATE s.ag(*)` (or use `ROUTINE`):
 `Origin`, reads it with `originColumns`, and sets its `filterColumns`'
 `system`/`extension` from `systemSchema`/`isExtensionMember` on the same
 expressions, so a row's flags and the filter never disagree. `catalogTable`
-holds `pg_class`, `pg_proc`, `pg_type`, `pg_namespace`; a family whose
-objects live elsewhere (operators, casts, FDWs, event triggers, languages)
-adds its catalog. Objects with no schema (event triggers, casts, languages,
-FDWs) have no `IsSystem` by this rule — the family decides (an OID below
-`FirstNormalObjectId`, 16384, is the usual sign of a built-in one). The P5
+holds `pg_class`, `pg_proc`, `pg_type`, `pg_namespace`,
+`pg_event_trigger` (P4.9); a family whose objects live elsewhere
+(operators, casts, FDWs, languages) adds its catalog. Objects with no schema
+(event triggers, extensions, casts, languages, FDWs) have no `IsSystem` by
+this rule — the family decides (an OID below `FirstNormalObjectId`, 16384,
+is the usual sign of a built-in one; event triggers use it, P4.9, and
+extensions, P4.10, where it marks plpgsql). The P5
 scripter writes `CREATE EXTENSION` for a member, never the member's DDL.
 
 ## Databases: what P4.1 left
@@ -218,7 +220,9 @@ scripter writes `CREATE EXTENSION` for a member, never the member's DDL.
 - **Not read yet:** `pg_database_collation_actual_version(oid)` (the
   version mismatch `ALTER DATABASE … REFRESH COLLATION VERSION` fixes),
   `age(datfrozenxid)` (wraparound, P6/P14), `datacl` (privileges,
-  P4.13.4/P8), `dathasloginevt` (17+; event triggers, P4.9).
+  P4.13.4/P8), `dathasloginevt` (17+; a flag the server keeps so a login can skip
+  the event trigger lookup — `Database.EventTriggers` filtered on
+  `EventTriggerLogin` is the answer, so it stays unread).
 - **`diagram/`** is still empty: no family through P4.1 has its class
   diagram yet (gosmo's `diagram/*.mmd`).
 
@@ -294,8 +298,7 @@ scripter writes `CREATE EXTENSION` for a member, never the member's DDL.
   form (`pg_dump`'s), with the leading space and closing semicolon the
   server gives; a properties pane may want `pg_get_viewdef(oid, true)` —
   add a field or a method then, not a second listing.
-- **A view's triggers and rules.** `INSTEAD OF` triggers on a view are
-  P4.9's (`Table.Triggers`' query is keyed by OID and would serve as is);
+- **A view's rules.** A view's triggers are `View.Triggers` (P4.9);
   rules other than the view's own `_RETURN` (`pg_rewrite`) are P8.2's, with
   a table's.
 - **Not read yet:** whether a view is automatically updatable
@@ -305,6 +308,94 @@ scripter writes `CREATE EXTENSION` for a member, never the member's DDL.
   table access method (`relam`), the query's dependencies (P4.14,
   `pg_depend` via `pg_rewrite`).
 - **One view at a time**, as § Tables: each part is a statement per view.
+
+## Sequences: what P4.7 left
+
+- **The unlogged-on-a-standby refusal of `Sequence.LastValue`** is tested
+  offline only: the lab has no standby (§ Lab). pgmo never calls
+  `pg_sequence_last_value` on one, whatever a release answers there.
+- **`LastValue` is the stored value**, not the last one any session handed
+  out: a session's `CACHE` runs ahead of it, and nothing in SQL reads
+  another session's cache. `log_cnt`/`is_called` read straight from the
+  sequence relation need SELECT (USAGE is not enough), so pgmo does not
+  read them.
+- **Not read:** the sequence's own `ALTER SEQUENCE … OWNED BY` history (only
+  the current owner), a sequence's dependants (`DEFAULT nextval(…)` columns
+  are P4.14's `pg_depend` reads), logical replication of sequences (19+).
+- **A listing for a column**: the column's sequence is found from the
+  sequence side (`OwnedBy`); `Column` carries `Identity` but no link back.
+  pgMS can match by `OwnedBy` + `OwnedByColumn`; add a field if a caller
+  needs the sequence without the listing.
+
+## Types and domains: what P4.8 left
+
+- **A base type's `Default`/`HasDefault`** is tested offline only: no
+  pg_catalog type has one, and a base type with a default needs CREATE TYPE
+  with C functions (superuser). The column is read as stored.
+- **No `ArrayType` field.** The array the server makes beside each type is
+  not listed and its name (`_name`, or another when that was taken) is not
+  read; a caller needing it reads `typarray` itself. Add a field when one
+  does (P5's scripting does not: the array follows its element).
+- **Range constructors are functions.** `CREATE TYPE … AS RANGE` makes
+  constructor functions named after the range and the multirange (two and
+  three); `Database.Functions` lists them as the user's, as psql's `\df`
+  does. pgMS may want to group them under the type.
+- **Rendered text follows the caller's `search_path`**: a domain's
+  `Default` and each `DomainConstraint.Definition`, as every expression
+  pgmo reads (§ Tables). The structured names (`BaseType`, `Subtype`,
+  `Element`, attribute types, every `ObjectName`) do not.
+- **Not read:** an enum's sort-order values (`enumsortorder`, floats — the
+  order is in `Labels`), a type's dependants (columns, functions:
+  P4.14's `pg_depend` reads), `typndims` (only `pg_dump` cares, for a
+  domain over an array, and `BaseType` already spells `[]`).
+
+## Triggers and event triggers: what P4.9 left
+
+- **The WHEN condition is text in `Definition` only.** `pg_get_expr` on
+  `tgqual` refuses an expression over OLD and NEW; `HasCondition` says
+  whether there is one. Cutting it out of the definition would mean
+  parsing the statement; a properties pane shows the definition.
+- **`Definition` follows the session**: names by `search_path` (as every
+  rendered expression, § Tables) and argument literals by
+  `standard_conforming_strings` (off doubles a backslash). The P5 scripter
+  renders under fixed settings, or builds the statement from the fields —
+  every clause but WHEN has one.
+- **Foreign tables' triggers** are read by `Database.Triggers` and
+  `TriggerByName` only; a `ForeignTable.Triggers` part comes with P4.12's
+  foreign table type, on `relationTriggers` as `View.Triggers` does.
+- **No `XChanges`/writes yet**: `ALTER TABLE … ENABLE/DISABLE TRIGGER`,
+  `ALTER TRIGGER … RENAME`, `DROP TRIGGER … ON`, `ALTER EVENT TRIGGER
+  … ENABLE/DISABLE/OWNER/RENAME` and both CREATEs are P4.13.3. An event
+  trigger's owner must be a superuser — a write to refuse early.
+- **Not read:** a trigger's dependency on the columns its WHEN names
+  (`pg_depend`, P4.14); `ALTER TRIGGER … DEPENDS ON EXTENSION` (deptype
+  `'x'`; a trigger is then dropped with the extension but stays a user
+  object); a constraint trigger's referenced table (`tgconstrrelid`, only
+  set by the server's own foreign-key triggers, which are not read).
+
+## Extensions: what P4.10 left
+
+- **Update paths are not read.** `DefaultVersion` differing from `Version`
+  does not promise an `ALTER EXTENSION … UPDATE` path, nor does a newer
+  listed version; `pg_extension_update_paths(name)` answers that (one call
+  per extension, executable by PUBLIC). Add it as an on-demand read when
+  pgMS's Update dialog needs it (P8/P4.13.3).
+- **Members are identities, not objects** (`ARCHITECTURE.md` §
+  Extensions): pgMS maps `Catalog` + `OID` to a family's read where one
+  exists. A typed form — `Functions`, `Types`… of an extension — is the
+  families' `ObjectFilter.ExtensionMember` plus the name (`Origin.Extension`)
+  already.
+- **Not read:** an object's `ALTER … DEPENDS ON EXTENSION` (deptype `'x'`:
+  dropped with the extension, still a user object — P4.14's dependents);
+  the control-file settings the views do not show (`module_pathname`,
+  `directory`, `encoding`, `no_relocate` 16+); which extensions require an
+  installed one (the reverse of `Requires`, for DROP … CASCADE — `Requires`
+  over the listing, inverted in Go).
+- **No writes yet**: `CREATE EXTENSION … [SCHEMA] [VERSION] [CASCADE]`,
+  `ALTER EXTENSION … UPDATE [TO]`, `SET SCHEMA`, `ADD`/`DROP` member,
+  `DROP EXTENSION … [CASCADE]`, `COMMENT ON EXTENSION` are P4.13.3. Who may
+  create one is `AvailableExtensionVersion.Superuser`/`Trusted` and CREATE
+  on the database — a refusal pgMS can show before sending.
 
 ## Routines: what P4.6 left
 
@@ -318,8 +409,10 @@ scripter writes `CREATE EXTENSION` for a member, never the member's DDL.
   an aggregate's `HYPOTHETICAL` / `PARALLEL` beyond the kind and
   `Parallel`, the `FINALFUNC_EXTRA` dummy argument types.
 - **Event triggers' and triggers' functions** are `Function`s of return
-  type `trigger` / `event_trigger`; P4.9 links them, nothing here flags
-  them.
+  type `trigger` / `event_trigger`; `Trigger.Function` and
+  `EventTrigger.Function` name them (P4.9), but nothing on a `Function`
+  flags it as one or lists the triggers calling it — a reverse lookup is
+  `Database.Triggers` filtered in Go, or P4.14's dependents.
 - **An aggregate by-name read is ~60 ms**, most of it planning its
   thirty-odd joins (the aggregate's eight functions, three types, sort
   operator). Fine for a properties pane; a pgMS hover over many aggregates
