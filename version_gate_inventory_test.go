@@ -181,6 +181,14 @@ var statementGates = []statementGate{
 	{"virtual generated column", PostgreSQL18, nil,
 		`CREATE TEMP TABLE pgmo_gate_virtual (a int, b int GENERATED ALWAYS AS (a * 2) VIRTUAL)`,
 		"42601"},
+	// ICU tailoring rules came to collations and databases together;
+	// CREATE DATABASE … ICU_RULES cannot be probed in a transaction, so the
+	// collation's form stands for both (CreateDatabase's gate).
+	{"ICU tailoring rules", PostgreSQL16, nil,
+		`CREATE COLLATION pg_temp.pgmo_gate_rules (provider = icu, locale = 'und', rules = '&a < b')`,
+		"42601"},
+	// The builtin provider came to collations and databases together
+	// (CreateDatabase's LOCALE_PROVIDER builtin and BUILTIN_LOCALE gate).
 	{"builtin collation provider", PostgreSQL17, nil,
 		`CREATE COLLATION pg_temp.pgmo_gate_builtin (provider = builtin, locale = 'C')`,
 		"42P17"},

@@ -365,7 +365,7 @@ func TestViewParts(t *testing.T) {
 	_, _, v, m := loadedViews(t, map[string]pgmotest.Responder{
 		"FROM pg_catalog.pg_attribute a": rowsOf(columnTypes,
 			[]any{int32(1), "id", uint32(23), "integer", false, "7", "", "", "", "", "",
-				"p", int32(-1), true, int32(0), []string{"B b"}, []string{"own"}, []string{"INSERT"}, []bool{false}, "key"}),
+				"p", int32(-1), true, int32(0), []string{"B b"}, []string{"own"}, []string{"INSERT"}, []bool{false}, []string{}, "key"}),
 		"FROM pg_catalog.pg_index i": rowsOf(indexTypes,
 			[]any{uint32(50001), "totals_n", "CREATE UNIQUE INDEX totals_n ON app.totals USING btree (n)", "btree",
 				true, false, false, false, false, true, []string{"n"}, []string{}, "", "", "", nil, ""}),

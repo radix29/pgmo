@@ -27,7 +27,7 @@ var (
 		pgtype.BoolOID, pgtype.BoolOID, pgtype.Int8OID, pgtype.BoolOID}, append(aclTypes, pgtype.TextOID)...)
 	columnTypes = append([]uint32{pgtype.Int4OID, pgtype.TextOID, pgtype.OIDOID, pgtype.TextOID, pgtype.BoolOID, pgtype.TextOID,
 		pgtype.TextOID, pgtype.TextOID, pgtype.TextOID, pgtype.TextOID, pgtype.TextOID,
-		pgtype.TextOID, pgtype.Int4OID, pgtype.BoolOID, pgtype.Int4OID}, append(aclTypes, pgtype.TextOID)...)
+		pgtype.TextOID, pgtype.Int4OID, pgtype.BoolOID, pgtype.Int4OID}, append(aclTypes, pgtype.TextArrayOID, pgtype.TextOID)...)
 	constraintTypes = []uint32{pgtype.OIDOID, pgtype.TextOID, pgtype.TextOID, pgtype.TextOID, pgtype.TextArrayOID,
 		pgtype.BoolOID, pgtype.BoolOID, pgtype.BoolOID, pgtype.BoolOID, pgtype.BoolOID, pgtype.Int4OID, pgtype.BoolOID,
 		pgtype.TextOID, pgtype.TextOID, pgtype.TextOID, pgtype.TextArrayOID,
@@ -289,9 +289,10 @@ func TestTableColumns(t *testing.T) {
 	_, other, tb := loadedTable(t, map[string]pgmotest.Responder{
 		"FROM pg_catalog.pg_attribute a": rowsOf(columnTypes,
 			[]any{int32(6), "label", uint32(25), "text", true, "'x'::text", "", "", "", "pg_catalog", "C",
-				"e", int32(500), false, int32(2), []string{"B b"}, []string{"own"}, []string{"UPDATE"}, []bool{true}, "lbl"},
+				"e", int32(500), false, int32(2), []string{"B b"}, []string{"own"}, []string{"UPDATE"}, []bool{true},
+				[]string{"column_name=Label", "x=a=b"}, "lbl"},
 			[]any{int32(9), "tripled", uint32(1700), "numeric", false, "", "d", "v", "(amount * (3)::numeric)", "", "",
-				"m", int32(-1), true, int32(0), nil, nil, nil, nil, ""}),
+				"m", int32(-1), true, int32(0), nil, nil, nil, nil, []string{}, ""}),
 	})
 	cols, err := tb.Columns(t.Context())
 	if err != nil {
@@ -301,20 +302,22 @@ func TestTableColumns(t *testing.T) {
 		{Number: 6, Name: "label", TypeOID: 25, Type: "text", NotNull: true, Default: "'x'::text",
 			Collation: pgmo.ObjectName{Schema: "pg_catalog", Name: "C"}, Storage: pgmo.StorageExternal, StatisticsTarget: 500,
 			InheritCount: 2, Privileges: []pgmo.PrivilegeGrant{{Grantee: "B b", Grantor: "own", Privilege: pgmo.PrivilegeUpdate, Grantable: true}},
-			Comment: "lbl"},
+			FDWOptions: []pgmo.ParameterSetting{{Name: "column_name", Value: "Label"}, {Name: "x", Value: "a=b"}},
+			Comment:    "lbl"},
 		{Number: 9, Name: "tripled", TypeOID: 1700, Type: "numeric", Identity: pgmo.IdentityByDefault, Generated: pgmo.GeneratedVirtual,
 			GenerationExpression: "(amount * (3)::numeric)", Storage: pgmo.StorageMain, StatisticsTarget: -1, IsLocal: true},
 	}
 	if len(cols) != 2 || !reflect.DeepEqual(*cols[0], want[0]) || !reflect.DeepEqual(*cols[1], want[1]) {
 		t.Errorf("Columns =\n%+v\n%+v\nwant\n%+v", cols[0], cols[1], want)
 	}
-	if n := reflect.TypeFor[pgmo.Column]().NumField(); n != 16 {
-		t.Errorf("Column has %d fields; this test checks 16 — add the new one", n)
+	if n := reflect.TypeFor[pgmo.Column]().NumField(); n != 17 {
+		t.Errorf("Column has %d fields; this test checks 17 — add the new one", n)
 	}
 	last := lastQuery(other)
 	for _, w := range []string{"WHERE a.attrelid = $1 AND a.attnum > 0 AND NOT a.attisdropped\nORDER BY a.attnum",
 		"COALESCE(a.attstattarget, -1)::integer", "CASE WHEN a.attcollation <> t.typcollation",
 		"pg_catalog.format_type(a.atttypid, a.atttypmod)", "pg_catalog.aclexplode(a.attacl)",
+		"COALESCE(a.attfdwoptions, '{}'),\n\tCOALESCE(pg_catalog.col_description(a.attrelid, a.attnum), '')",
 		"CASE WHEN a.attgenerated = '' THEN COALESCE(pg_catalog.pg_get_expr(ad.adbin, ad.adrelid), '') ELSE '' END"} {
 		if !strings.Contains(last.Text, w) {
 			t.Errorf("no %q in\n%s", w, last.Text)

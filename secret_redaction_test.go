@@ -29,6 +29,14 @@ func secretWrites() []secretWrite {
 		{"alter role password", []string{pw("role")}, func(ctx context.Context, s *pgmo.Server) error {
 			return s.AlterRolePassword(ctx, "app", pw("role"))
 		}},
+		{"set role password", []string{pw("set")}, func(ctx context.Context, s *pgmo.Server) error {
+			return s.RoleRef("app").SetPassword(ctx, pw("set"))
+		}},
+		{"create role with password", []string{pw("create")}, func(ctx context.Context, s *pgmo.Server) error {
+			_, err := s.CreateRole(ctx, pgmo.CreateRoleRequest{Name: "app", Password: pw("create"),
+				RoleAttributes: pgmo.RoleAttributes{CanLogin: new(true)}, InRole: []string{"g"}})
+			return err
+		}},
 	}
 }
 
@@ -76,6 +84,7 @@ func TestSecretsNeverCapturedOrSent(t *testing.T) {
 			// Captured: the placeholder, bare, and nothing sent — not even
 			// the scram_iterations read.
 			f := pgmotest.New(t)
+			f.On("FROM pg_catalog.pg_roles r", roleRows()) // a create's read-back
 			s := f.Server()
 			before := len(f.Queries())
 			ctx, col := pgmo.WithScript(t.Context())
@@ -116,6 +125,7 @@ func TestSecretsNeverCapturedOrSent(t *testing.T) {
 			f15 := pgmotest.New(t)
 			f15.Version = pgmo.PostgreSQL15
 			f15.On("current_setting('scram_iterations'", pgmotest.Rows([]any{nil}))
+			f15.On("FROM pg_catalog.pg_roles r", roleRows())
 			before = len(f15.Queries())
 			if err := w.write(t.Context(), f15.Server()); err != nil {
 				t.Fatalf("run on 15: %v", err)

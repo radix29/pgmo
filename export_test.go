@@ -145,3 +145,16 @@ func (c *Cast) SetDatabase(d *Database) { c.db = d }
 // SetDatabase replaces the Operator's back-pointer, so a test can compare
 // the catalog fields of two Operators with reflect.DeepEqual.
 func (o *Operator) SetDatabase(d *Database) { o.db = d }
+
+// SetDatabase replaces the ForeignDataWrapper's back-pointer, so a test can
+// compare the catalog fields of two wrappers with reflect.DeepEqual.
+func (w *ForeignDataWrapper) SetDatabase(d *Database) { w.db = d }
+
+// SetDatabase replaces the ForeignServer's back-pointer, as above.
+func (s *ForeignServer) SetDatabase(d *Database) { s.db = d }
+
+// SetDatabase replaces the UserMapping's back-pointer, as above.
+func (m *UserMapping) SetDatabase(d *Database) { m.db = d }
+
+// SetDatabase replaces the ForeignTable's back-pointer, as above.
+func (t *ForeignTable) SetDatabase(d *Database) { t.db = d }

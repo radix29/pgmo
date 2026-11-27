@@ -108,26 +108,6 @@ that needs it, and is added to `pgmotest` in the same change:
 - **pgx.Tx extras.** `SendBatch` and `Prepare` fail the test;
   `LargeObjects` returns pgx's zero value, which panics if used.
 
-## Roles: what P4.2 left
-
-- **No password flag.** Whether a role has a password (and its hash's
-  method) is `pg_authid.rolpassword`, readable by superusers only; pg_roles
-  shows `********` for every role. A superuser-only `HasPassword` read could
-  be added for pgMS's Login properties page (P8) if it needs one.
-- **Direct grants only.** `MemberOf`/`Members` are `pg_auth_members` rows;
-  the transitive closure (what a role holds through nesting, and with which
-  INHERIT/SET path) is `pg_has_role` per pair or a recursive query — add it
-  with effective permissions (P4.13.4/P5).
-- **`ALTER ROLE ALL SET`** (`pg_db_role_setting` with both `setrole` and
-  `setdatabase` 0) is neither a role's nor a database's setting and is not
-  read; neither is `ALTER ROLE ALL IN DATABASE`, which is
-  `Database.Settings`.
-- **`RoleMembership.Inherit`/`Set` on 15 are what 15 checks**, not stored
-  options; a P4.13.2 write must not emit `WITH INHERIT`/`SET` before 16.
-- **Not read yet:** objects owned (`pg_shdepend`, needed before a drop —
-  `REASSIGN OWNED`/`DROP OWNED`, P4.14), `rolpassword` method, security
-  labels.
-
 ## Flaky: `TestDatabasePoolsUnderConcurrency` under `-race`
 
 Seen 2026-11-21 while landing P2.2.6, present before it (2 of 15 runs on
@@ -196,12 +176,13 @@ expressions, so a row's flags and the filter never disagree. `catalogTable`
 holds `pg_class`, `pg_proc`, `pg_type`, `pg_namespace`,
 `pg_event_trigger` (P4.9), and P4.11's `pg_collation`, `pg_language`,
 `pg_cast`, `pg_operator` and the four `pg_ts_*`; a family whose objects
-live elsewhere (FDWs) adds its catalog. Objects with no schema
-(event triggers, extensions, casts, languages, tablespaces, FDWs) have no
-`IsSystem` by this rule — the family decides (an OID below
-`FirstNormalObjectId`, 16384, is the usual sign of a built-in one; event
-triggers use it, P4.9, extensions, P4.10, where it marks plpgsql, and
-tablespaces, languages and casts, P4.11). The P5
+live elsewhere adds its catalog (P4.12 added `pg_foreign_data_wrapper`
+and `pg_foreign_server`). Objects with no schema (event triggers,
+extensions, casts, languages, tablespaces, FDWs) have no `IsSystem` by
+this rule — the family decides (an OID below `FirstNormalObjectId`, 16384,
+is the usual sign of a built-in one; event triggers use it, P4.9,
+extensions, P4.10, where it marks plpgsql, tablespaces, languages and
+casts, P4.11, wrappers and servers, P4.12, where it marks none). The P5
 scripter writes `CREATE EXTENSION` for a member, never the member's DDL.
 
 ## Databases: what P4.1 left
@@ -210,10 +191,22 @@ scripter writes `CREATE EXTENSION` for a member, never the member's DDL.
   `setdatabase` and `setrole` set, `ALTER ROLE … IN DATABASE … SET`) are not
   on `Database.Settings`; P4.2 reads them with the role
   (`Role.DatabaseSettings`).
-- **`ParameterSetting.Value` is the stored text, not a literal.** A list
-  parameter keeps its elements' quotes (`"$user", public`); the P4.13.1
-  `SET` write must turn it back into a statement the way `pg_dump` does
-  (`GUC_LIST_QUOTE` parameters split and quoted per element).
+- **`ParameterSetting.Value` is the stored text, not a literal.**
+  `ParameterSetting.Values()` (P4.13.1) splits a list-quoted parameter as
+  pg_dump does, from pg_dump's list of the built-in ones; an extension's
+  list-quoted parameter is not known (the flag is not in SQL) and reads as
+  one value. Watch a release adding a `GUC_LIST_QUOTE` parameter
+  (pg_dump's `variable_is_guc_list_quote`).
+- **Not written by P4.13.1:** `COMMENT ON DATABASE` (P4.13.3's comment
+  writes), `ALTER DATABASE … REFRESH COLLATION VERSION`, `ALTER DATABASE …
+  SET … FROM CURRENT`, `ALTER ROLE … IN DATABASE … SET` (the role's,
+  P4.13.2), `GRANT … ON DATABASE` (P4.13.4), `DROP DATABASE IF EXISTS`
+  (a missing database is the server's 3D000).
+- **`releaseDatabase` closes only an idle pool.** Another goroutine reading
+  the database between the release and the `DROP`/`RENAME` reopens one, and
+  the statement then fails with 55006 (or `FORCE` terminates it). pgMS should
+  not read a database it is dropping; if that race shows up, hold the pool
+  closed for the statement's length.
 - **No sizes with the listing.** `Database.Size` is one round trip per
   database; a Details pane over hundreds of databases may want one read of
   every size it may see (`CASE WHEN has_database_privilege(oid, 'CONNECT')
@@ -228,7 +221,7 @@ scripter writes `CREATE EXTENSION` for a member, never the member's DDL.
 - **`diagram/`** is still empty: no family through P4.1 has its class
   diagram yet (gosmo's `diagram/*.mmd`).
 
-## Roles: what P4.2 left
+## Roles: what P4.2 and P4.13.2 left
 
 - **No password flag.** Whether a role has a password (and its hash's
   method) is `pg_authid.rolpassword`, readable by superusers only; pg_roles
@@ -243,10 +236,23 @@ scripter writes `CREATE EXTENSION` for a member, never the member's DDL.
   read; neither is `ALTER ROLE ALL IN DATABASE`, which is
   `Database.Settings`.
 - **`RoleMembership.Inherit`/`Set` on 15 are what 15 checks**, not stored
-  options; a P4.13.2 write must not emit `WITH INHERIT`/`SET` before 16.
+  options; the P4.13.2 writes refuse `INHERIT`/`SET` (and `ADMIN FALSE`)
+  before 16 with `ErrUnsupportedVersion`.
 - **Not read yet:** objects owned (`pg_shdepend`, needed before a drop —
   `REASSIGN OWNED`/`DROP OWNED`, P4.14), `rolpassword` method, security
   labels.
+- **Not written yet (P4.13.2):** `REASSIGN OWNED BY … TO …` and `DROP OWNED
+  BY …` — per database, through `execIn`; add them with P4.14's owned-object
+  read, which a Delete dialog (P8.7) needs to show what they would touch.
+  `COMMENT ON ROLE` is P4.13.3's comment write. `ALTER ROLE ALL [IN
+  DATABASE] SET` is not written, as it is not read. `SET … FROM CURRENT`
+  is not offered (the session's value, not the caller's).
+- **Memberships are not mirrored** by `AddMember`/`RemoveMember`: the
+  server records the grantor (from 16 a superuser's grant as the bootstrap
+  superuser's) and may merge with an existing grant; read the role again.
+- **pgx login vs SASLprep** (§ Passwords): pgMS's password dialog could
+  warn when NFKC changes the password; pgmo exposes no helper yet
+  (`internal/scram.Normalize` is internal) — add one when P8's dialog asks.
 
 ## Schemas: what P4.3 left
 
@@ -280,7 +286,7 @@ scripter writes `CREATE EXTENSION` for a member, never the member's DDL.
   partitions (`pg_partition_tree`) is left to the caller or P6.
 - **Not read yet:** identity sequence options (P4.7, `pg_get_serial_sequence`
   / the owned-by link), `attcompression`, `attoptions` (per-column
-  `n_distinct`), `attfdwoptions` (P4.12), `confdelsetcols` (`ON DELETE SET
+  `n_distinct`), `confdelsetcols` (`ON DELETE SET
   NULL (cols)` — in `Definition`), `conperiod` (18, `WITHOUT OVERLAPS` /
   `PERIOD` — in `Definition`), a partitioned index's parent
   (`pg_inherits` over indexes), replica identity (`relreplident`, P14),
@@ -362,9 +368,6 @@ scripter writes `CREATE EXTENSION` for a member, never the member's DDL.
   `standard_conforming_strings` (off doubles a backslash). The P5 scripter
   renders under fixed settings, or builds the statement from the fields —
   every clause but WHEN has one.
-- **Foreign tables' triggers** are read by `Database.Triggers` and
-  `TriggerByName` only; a `ForeignTable.Triggers` part comes with P4.12's
-  foreign table type, on `relationTriggers` as `View.Triggers` does.
 - **No `XChanges`/writes yet**: `ALTER TABLE … ENABLE/DISABLE TRIGGER`,
   `ALTER TRIGGER … RENAME`, `DROP TRIGGER … ON`, `ALTER EVENT TRIGGER
   … ENABLE/DISABLE/OWNER/RENAME` and both CREATEs are P4.13.3. An event
@@ -417,6 +420,31 @@ scripter writes `CREATE EXTENSION` for a member, never the member's DDL.
 - **No writes here.** Tablespace create/rename/owner/options/drop is
   P4.13.3 (`CREATE TABLESPACE` cannot run in a transaction); the others
   are scripted by P5 from these reads.
+
+## Foreign data: what P4.12 left
+
+- **No writes.** CREATE/ALTER/DROP of wrappers, servers, user mappings and
+  foreign tables, and `IMPORT FOREIGN SCHEMA`, are not in P4.13's list
+  yet; add them there when pgMS's dialogs need them. A user mapping's
+  `OPTIONS (password …)` is a secret written in the mapping's database
+  (§ Script mode: `execInSecret`), and sent as cleartext — say so in that
+  write's doc.
+- **`OptionsHidden` restates `pg_user_mappings`' condition** (identical on
+  15–18). A release changing the view must change the restatement;
+  `TestLiveForeignData` fails on the difference for the four roles it
+  reads as, so run it on each new major.
+- **A wrapper's handler and validator are names only.** postgres_fdw's
+  are in the schema its extension was created in; their signatures are
+  fixed by the server (`fdw_handler`, `(text[], oid)`), so no argument
+  types are read.
+- **No foreign tables per server.** `ForeignServer.ForeignTables` is not
+  read; filter `Database.ForeignTables` by `Server` in Go, or add the part
+  when the Object Explorer nests them.
+- **An option name holding `=`** (a quoted identifier) reads split at
+  that `=`, as `pg_options_to_table` reads it.
+- **`Database.Tables` lists kinds `r` and `p` only**; a foreign table is a
+  `ForeignTable`. A table's `Children` may be one (`Kind`
+  `RelationForeignTable`).
 
 ## Routines: what P4.6 left
 

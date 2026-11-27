@@ -117,6 +117,11 @@ type Column struct {
 	// granted on the whole table are on Table.Privileges.
 	Privileges []PrivilegeGrant
 
+	// FDWOptions are a foreign table's column's own options
+	// (attfdwoptions) in stored order — postgres_fdw's column_name; nil
+	// for none, and for a column of any other relation.
+	FDWOptions []ParameterSetting
+
 	// Comment is COMMENT ON COLUMN's text, empty for none.
 	Comment string
 }
@@ -137,6 +142,7 @@ var columnsQuery = `SELECT a.attnum::integer, a.attname::pg_catalog.text, a.attt
 	a.attstorage::pg_catalog.text, COALESCE(a.attstattarget, -1)::integer,
 	a.attislocal, a.attinhcount::integer,
 	` + aclColumns("p") + `,
+	COALESCE(a.attfdwoptions, '{}'),
 	COALESCE(pg_catalog.col_description(a.attrelid, a.attnum), '')
 FROM pg_catalog.pg_attribute a
 JOIN pg_catalog.pg_type t ON t.oid = a.atttypid
@@ -154,15 +160,17 @@ func scanColumn(scan func(...any) error) (*Column, error) {
 	c := &Column{}
 	var identity, generated, storage string
 	var acl privilegeArrays
+	var fdwOptions []string
 	dest := []any{&c.Number, &c.Name, &c.TypeOID, &c.Type, &c.NotNull, &c.Default,
 		&identity, &generated, &c.GenerationExpression, &c.Collation.Schema, &c.Collation.Name,
 		&storage, &c.StatisticsTarget, &c.IsLocal, &c.InheritCount}
 	dest = append(dest, acl.dest()...)
-	dest = append(dest, &c.Comment)
+	dest = append(dest, &fdwOptions, &c.Comment)
 	if err := scan(dest...); err != nil {
 		return nil, err
 	}
 	c.Identity, c.Generated, c.Storage = IdentityKind(identity), GeneratedKind(generated), StorageKind(storage)
+	c.FDWOptions = parseSettings(fdwOptions)
 	var err error
 	c.Privileges, err = acl.all()
 	return c, err

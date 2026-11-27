@@ -838,8 +838,8 @@ and nothing else; a password does not even reach the server.
   `""` too), one holding NUL (no client can send it), a `scram_iterations`
   that is not a positive count.
 - **`s.alterRolePassword(ctx, role, password)`** (`ALTER ROLE … PASSWORD
-  '<verifier>'`) is the write the role family's password methods build on
-  (P4.13.2); until then only tests call it.
+  '<verifier>'`) is `Role.SetPassword`; `Server.CreateRole` builds its
+  `PASSWORD` clause through the same `passwordClause` (§ Role writes).
 
 Tests: `internal/scram` — verifier vectors computed independently (Python
 `hashlib`), every SASLprep step and fallback (`normalizeCases`, including a
@@ -1015,6 +1015,92 @@ provider on 17+); `Size` as superuser, through `PUBLIC`'s `CONNECT`, refused
 without it, and answered for a `pg_read_all_stats` member. Dropping the
 `setrole = 0` condition is caught live.
 
+### Database writes (`database_write.go`)
+
+Landed P4.13.1, the first family of writes. Every statement goes through
+`s.exec` — the Server's own database: a database is a cluster-wide object,
+written from any session but its own.
+
+| Method | Statement | Notes |
+|---|---|---|
+| `Server.CreateDatabase(ctx, CreateDatabaseRequest)` | `CREATE DATABASE n WITH OWNER = … TEMPLATE = … ENCODING = '…' STRATEGY = … LOCALE_PROVIDER = … LOCALE = '…' LC_COLLATE = '…' LC_CTYPE = '…' ICU_LOCALE = '…' ICU_RULES = '…' BUILTIN_LOCALE = '…' TABLESPACE = … ALLOW_CONNECTIONS = … CONNECTION LIMIT = … IS_TEMPLATE = …` | only the fields set, in that order; read back by `DatabaseByName` (`createdObject`) |
+| `Database.Drop(ctx, DropDatabaseOptions)` | `DROP DATABASE n [WITH (FORCE)]` | `Force` opt-in, never a default |
+| `Database.Rename(ctx, newName)` | `ALTER DATABASE n RENAME TO m` | mirrors `Name` |
+| `Database.SetOwner(ctx, role)` | `ALTER DATABASE n OWNER TO r` | mirrors `Owner` |
+| `Database.SetTablespace(ctx, ts)` | `ALTER DATABASE n SET TABLESPACE t` | mirrors `Tablespace` |
+| `Database.Alter(ctx, DatabaseChanges)` | `ALTER DATABASE n WITH ALLOW_CONNECTIONS = … CONNECTION LIMIT = … IS_TEMPLATE = …` | the fields set; empty sends nothing; mirrors each |
+| `Database.SetParameter(ctx, name, values...)` | `ALTER DATABASE n SET name = 'v1'[, 'v2'…]` | not mirrored |
+| `Database.ResetParameter(ctx, name)` | `ALTER DATABASE n RESET name` | not mirrored |
+| `Database.ResetAllParameters(ctx)` | `ALTER DATABASE n RESET ALL` | mirrors `Settings = nil` |
+
+- **Names** (database, owner, template, tablespace, parameter) go through
+  `QuoteIdent`; locale, encoding and parameter values through
+  `QuoteLiteral`. A custom parameter's dotted name is quoted whole
+  (`"myext.opt"`), as pg_dump writes it: one identifier holding the dot is
+  the parameter's name. The server folds a built-in parameter's name itself,
+  so `"DateStyle"` and `"WORK_MEM"` reach the right one.
+- **Fields are options, not derived.** `Locale`, `Collate`, `CType`,
+  `ICULocale`, `BuiltinLocale` are the five options as the grammar has them;
+  pgmo does not fill one from another (`LOCALE` sets the ICU locale itself
+  from 16, the builtin one from 17).
+- **Gates** (checked on the lab): `ICU_RULES` 16+, the builtin provider and
+  `BUILTIN_LOCALE` 17+ — `ErrUnsupportedVersion` before anything is sent.
+  `CREATE DATABASE` cannot be probed in a transaction, so the inventory's
+  statement gates stand on `CREATE COLLATION`'s forms of the same features
+  ("ICU tailoring rules", "builtin collation provider").
+- **Refusals before sending**: `CREATE DATABASE`, `DROP DATABASE` and `SET
+  TABLESPACE` under `InTransaction` (`refuseInTx`, `ErrUnsupported`; the
+  others run on the transaction); `DROP`, `RENAME` and `SET TABLESPACE` of
+  the Server's own database (`ErrInvalidRequest` — the server's 55006/0A000
+  would only come after the script was written); a connection limit below
+  -1, an unknown strategy or provider, `LocaleProviderDefault` (a
+  collation's alone), an empty name or value.
+- **Pgmo's own sessions are released first.** `DROP`, `RENAME` and `SET
+  TABLESPACE` need the database free of sessions, and a read through
+  `DatabaseQuerier` leaves pgmo's own idle pool connected to it.
+  `releaseDatabase` (`database_pools.go`) closes that pool when it is idle
+  and drops it from the map, so the next statement there opens afresh; a
+  pool in use (a lease, open rows, a transaction) is the caller's session
+  and is left — the server then reports it as any other (55006, or `FORCE`
+  terminates it). Nothing is closed under `WithScript`. The server waits up
+  to five seconds for an exiting backend (`CountOtherDBBackends`), so the
+  closed sessions ending a moment later do not fail the statement. Without
+  the release, the live rename fails with 55006 (mutation-checked).
+- **Parameter values.** `pg_db_role_setting` stores a `GUC_LIST_QUOTE`
+  parameter (`search_path`, `temp_tablespaces`, the preload libraries,
+  `unix_socket_directories`) as its elements double-quoted where needed —
+  `"a b", "$user", ""` — and any other as the text it was given.
+  `ParameterSetting.Values()` splits the first kind as pg_dump's
+  `SplitGUCList` does and returns the second whole, so
+  `SetParameter(ctx, p.Name, p.Values()...)` stores the setting identically
+  (held live for each kind). The flag is not exposed in SQL
+  (`pg_settings_get_flags` omits it), so the list is pg_dump's
+  `variable_is_guc_list_quote`: an extension's list-quoted parameter
+  (the lab has `output_plugin_libraries`) reads as one value, pg_dump's
+  limit too. `Settings` is not mirrored by `SetParameter`/`ResetParameter`:
+  the server stores the canonical name and flattened value; read again.
+
+Tests: `script_database_write_test.go` — the exact statement of every write
+and option, through quote-hostile names (`My "DB"`, `user`, `o'brien`,
+`a\b`), captured as run in the Server's database with nothing sent (the
+first `script_*_write_test.go`; its `runScriptCases` is the harness later
+families reuse). `database_write_test.go` — every refusal under both send
+and `WithScript`, nothing sent; the 16/17 gates; `InTransaction` refusals
+and the ALTERs on the transaction; mirroring only when applied; the
+read-back (found, hidden, refused write); the pool release (idle closed and
+reopened, in use left, scripted untouched, other writes untouched);
+`Values` over every list-quoted parameter and each malformed form. 32
+mutations, all caught. `TestLiveDatabaseWrites` (pg15–pg18): an ICU
+database with every option (rules on 16+) read back field by field; the
+statement captured under `WithScript` run by hand makes the same database
+(builtin provider on 17+); rename and set tablespace (in-place) right after a
+read through `DatabaseQuerier`; owner, connection options, template refused
+by drop; five parameters — a hostile `search_path`, `temp_tablespaces`,
+`work_mem`, `DateStyle`, a custom one — stored and read back through
+`Values`, reset all, written back identically, one reset by a differently
+cased name; drop refused with a session connected (55006), forced past it,
+then 3D000.
+
 ### Roles (`role.go`)
 
 Landed P4.2 (reads; the writes are P4.13.2). PostgreSQL's one principal
@@ -1073,6 +1159,79 @@ member, two grants by different grantors (16+) or a dropped grantor (15),
 `System` both ways, and the listing read again as a plain role, identical.
 `JOIN` for the grantor's `LEFT JOIN` and a reversed grantor order are caught
 live.
+
+### Role writes (`role_write.go`)
+
+Landed P4.13.2. A role is cluster-wide, so every statement goes through
+`s.exec` (or `s.execSecret` when it carries a password) on the Server's own
+database, and every one may run inside `InTransaction` — role DDL is
+transactional, and a rolled-back create leaves nothing (held live).
+
+| Method | Statement | Notes |
+|---|---|---|
+| `Server.CreateRole(ctx, CreateRoleRequest)` | `CREATE ROLE n WITH [NO]SUPERUSER [NO]INHERIT [NO]CREATEROLE [NO]CREATEDB [NO]LOGIN [NO]REPLICATION [NO]BYPASSRLS CONNECTION LIMIT n PASSWORD '<verifier>' VALID UNTIL '…' IN ROLE … ROLE … ADMIN …` | only the fields set, pg_dumpall's order; `Password` via `passwordClause`/`execSecret`; read back by `RoleByName` (`createdObject`) |
+| `Role.Drop(ctx)` | `DROP ROLE n` | |
+| `Role.Rename(ctx, newName)` | `ALTER ROLE n RENAME TO m` | mirrors `Name` |
+| `Role.Alter(ctx, RoleAttributes)` | `ALTER ROLE n WITH …` | the attributes set; empty sends nothing; mirrors each |
+| `Role.SetPassword(ctx, password)` | `ALTER ROLE n PASSWORD '<verifier>'` | `alterRolePassword` (§ Secrets and passwords) |
+| `Role.ClearPassword(ctx)` | `ALTER ROLE n PASSWORD NULL` | |
+| `Role.SetParameter(ctx, name, values...)` | `ALTER ROLE n SET name = 'v1'[, …]` | `parameterAssignment`, shared with `Database.SetParameter`; not mirrored |
+| `Role.SetDatabaseParameter(ctx, db, name, values...)` | `ALTER ROLE n IN DATABASE d SET …` | not mirrored |
+| `Role.ResetParameter(ctx, name)` / `ResetDatabaseParameter(ctx, db, name)` | `ALTER ROLE n [IN DATABASE d] RESET name` | not mirrored |
+| `Role.ResetAllParameters(ctx)` | `ALTER ROLE n RESET ALL` | mirrors `Settings = nil` |
+| `Role.ResetAllDatabaseParameters(ctx, db)` | `ALTER ROLE n IN DATABASE d RESET ALL` | drops `d` from `DatabaseSettings` |
+| `Role.AddMember(ctx, member, MembershipOptions)` | `GRANT n TO m [WITH ADMIN … , INHERIT … , SET …] [GRANTED BY g]` | not mirrored (the server picks the grantor) |
+| `Role.RemoveMember(ctx, member, RevokeMembershipOptions)` | `REVOKE [ADMIN\|INHERIT\|SET OPTION FOR] n FROM m [GRANTED BY g] [CASCADE]` | not mirrored |
+
+- **`RoleAttributes`** is shared by the create (embedded in
+  `CreateRoleRequest`) and `Alter`: `*bool` per attribute, written as `X` or
+  `NOX` when set, so a create leaves the server's defaults (only `INHERIT`
+  on) and an alter leaves the rest unchanged. Names match `Role`'s fields.
+- **`ValidUntil`** is a `*time.Time`: the zero `Time` writes `'infinity'`
+  and `ValidUntilNegativeInfinity` `'-infinity'` — the two values the read
+  maps them from — so a round trip is exact. Any other time is written in
+  UTC with a `Z` and microseconds (finer truncated, and mirrored truncated,
+  as stored); years outside 1–9999 are refused. Checked on the lab: `Z`,
+  `infinity`, `-infinity` and BC dates are all taken.
+- **Membership options by release** (checked on 15, 16, 18): 15's `GRANT`
+  knows only `WITH ADMIN OPTION`, and a plain re-grant leaves an existing
+  admin option; 16+ takes `WITH ADMIN|INHERIT|SET TRUE|FALSE`, and a re-grant
+  by the same grantor updates only the options named. So on 15 `Admin`
+  false, `Inherit`, `Set`, and revoking the INHERIT or SET option are
+  `ErrUnsupportedVersion` before sending (the inventory's "GRANT role WITH
+  INHERIT/SET" gate); `RemoveMember` with `MembershipAdmin` is 15's way to
+  clear the admin option. `GRANTED BY` and `CASCADE` exist on 15 too. From 16
+  the role named by `GRANTED BY` must itself hold ADMIN — a superuser does
+  not (42501).
+- **The server's own refusals are left to it** (each held live with its
+  SQLSTATE): a predefined role altered or renamed (42939) or dropped
+  (2BP01), a `pg_` name (42939), a duplicate (42710), a role holding a
+  privilege dropped (2BP01; `REASSIGN OWNED`/`DROP OWNED` per database
+  clear it — not written yet), a membership cycle (0LP01), `NOSUPERUSER` on
+  the bootstrap superuser (0A000, 16+ only: **15 takes it**). Not tested
+  live but checked on the lab: the session or current user renamed (0A000)
+  or dropped (55006).
+- **Rename and passwords.** An MD5 verifier is salted with the role name,
+  so the server clears one on rename; SCRAM ones survive (held live).
+
+Tests: `script_role_write_test.go` — every statement and option, through
+quote-hostile names and values, and 15's membership forms.
+`role_write_test.go` — every refusal under both send and `WithScript`,
+nothing sent or captured; the 16/17/18 membership forms; every write on the
+`InTransaction` transaction; mirroring only when applied (and `ValidUntil`
+truncated); empty `Alter`; the create's read-back. `secretWrites` gained
+`Role.SetPassword` and `CreateRole` with a password.
+42 mutations of `role_write.go`, all caught offline.
+`TestLiveRoleWrites` (pg15–pg18): a role with every attribute, a nanosecond
+expiry, a password and all three membership lists read back (verifier
+checked against `pg_authid`); the statement captured under
+`WithScript`+`WithScriptSecrets` run by hand makes the same role and
+password; three alters, each read back equal to the mirror; rename keeping
+the password; set and clear password; three parameters in every database
+and in one, through `Values`, reset and written back; every membership
+option the release has, the others refused; the server refusals above;
+drop refused while a privilege is held, then done, then 42704; a create,
+alter and grant rolled back with their transaction.
 
 ### Schemas and privileges (`schema.go`, `privileges.go`)
 
@@ -1655,6 +1814,78 @@ matched to `pg_ts_config_map` × `ts_token_type`), `TestLiveLanguages`,
 matched to `regoperator`) — each listing matched to its catalog, and
 identical as a plain role and under a `search_path` holding the fixture's
 schema. 32 mutations, all caught offline.
+
+### Foreign data: wrappers, servers, user mappings, foreign tables (`foreign_data.go`, `foreign_table.go`)
+
+Landed P4.12 (reads; writes are P4.13, scripting P5). SQL/MED objects are
+a database's, read through its own pool; wrappers, servers and user
+mappings have no schema. Four families, each as the earlier ones: a
+listing taking an `ObjectFilter` pushed into its query, an exact by-name
+read (`ErrNotFound`), a lookup-free `Ref`, `Origin` on every type.
+
+- **Wrappers** (`Database.ForeignDataWrappers`, `ForeignDataWrapperByName`,
+  `ForeignDataWrapperRef`): handler and validator as `ObjectName`s (zero
+  for none), `Options`, ACL USAGE (`acldefault('F', owner)`), comment.
+  `IsSystem` is `oid < 16384` — initdb creates none; postgres_fdw's is an
+  extension member. `ForeignDataWrapper.Servers(ctx)` is the server
+  select narrowed by the wrapper's name, so it works on a Ref.
+- **Servers** (`ForeignServers`, `ForeignServerByName`,
+  `ForeignServerRef`): `Wrapper` by name, `Type`/`Version` (free text,
+  empty for none), `Options`, ACL USAGE (`acldefault('S', owner)`),
+  comment; can be an extension member (`ALTER EXTENSION … ADD SERVER`).
+  `ForeignServer.UserMappings(ctx)` keys on the name likewise.
+- **User mappings** (`UserMappings`, `UserMappingByName(ctx, server,
+  user)`, `UserMappingRef`; `""` is PUBLIC, as `PrivilegeGrant.Grantee`;
+  `Signature()` → `FOR role SERVER srv`). No name, owner or comment, never
+  system or a member: the filter's Name and Schema are ignored, System and
+  ExtensionMember true keep none. **Read from the `pg_user_mappings` view,
+  not `pg_user_mapping`**, which only a superuser may read (its options
+  hold passwords). The view lists every mapping to every role and shows a
+  mapping's options only to the mapped role holding USAGE on the server
+  (or membership in its owner), to a member of the owner for PUBLIC's, and
+  to a superuser; otherwise NULL — the same NULL as a mapping with none.
+  `OptionsHidden` restates the view's condition over what any role can
+  read (`pg_roles.rolsuper` for the view's `pg_authid`), so "withheld" and
+  "none" are told apart; it is never set where options are shown. The
+  view's definition is identical on 15–18; the live test holds the
+  restatement to it, role by role.
+- **Foreign tables** (`ForeignTables`, `ForeignTableByName(ctx, schema,
+  name)`, `ForeignTableRef`): `pg_class` kind `f` joined to
+  `pg_foreign_table` and the server — `Server`, `Options`, partition and
+  inheritance (`IsPartition`, `PartitionBound`, `Parents` — the table
+  read's `tableParents`), a table's ACL and comment; the relation filter
+  columns. Parts on demand, keyed by the OID with a table's queries:
+  `Columns`, `Constraints` (CHECK; NOT NULL rows from 18; a CHECK may be
+  NOT ENFORCED from 18), `Triggers` (`relationTriggers`). `Database.Tables`
+  still lists kinds `r` and `p` only.
+- **`Column.FDWOptions`** (`attfdwoptions`) is read for every relation's
+  columns — nil but on a foreign table's.
+
+Options everywhere are `text[]` `name=value` entries split on the first
+`=` (`parseSettings`), as `pg_options_to_table` splits them. A user
+mapping's password is shown as stored, cleartext, to whoever the view
+shows it to.
+
+| Type | Catalog | Notes |
+|---|---|---|
+| `ForeignDataWrapper` | `pg_foreign_data_wrapper`, `pg_description` | ACL USAGE, default the owner's alone |
+| `ForeignServer` | `pg_foreign_server` + its wrapper, `pg_description` | ACL USAGE, default the owner's alone |
+| `UserMapping` | `pg_user_mappings` (view) + `pg_foreign_server` | `OptionsHidden`; user `""` / OID 0 for PUBLIC |
+| `ForeignTable` | `pg_class` (`f`) + `pg_foreign_table` + `pg_foreign_server` | parts as a table's; `Column.FDWOptions` |
+
+Each listing is planned under 460 on pg15 and pg18. Tests: offline
+`foreign_data_test.go`, `foreign_table_test.go` (every field of two rows
+with field-count guards; each fragment; the filter tails; the by-name
+bindings; not found and server errors wrapped once; Refs; parts keyed by
+name or OID, a Ref's OID-keyed part refused; `conenforced` read from 18);
+live `TestLiveForeignData` on pg15–pg18 (wrappers, servers and foreign
+tables identical as a plain role; user mappings read as four roles —
+superuser, plain, the mapped role, a non-superuser server owner — each
+option matched to `pg_user_mappings` as that role, `OptionsHidden` exactly
+where it withholds options the catalog holds; case-only names; a
+partition, an inheriting foreign table, NOT ENFORCED on 18). 20 mutations,
+all caught (one, the version handed to the constraint read, after a test
+was added for it).
 
 ### Routines: functions, procedures, aggregates (`routine.go`)
 

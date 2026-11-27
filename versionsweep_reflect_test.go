@@ -56,18 +56,27 @@ var sweptTypes = map[string]reflect.Type{
 	"Cast":                    reflect.TypeFor[*Cast](),
 	"Operator":                reflect.TypeFor[*Operator](),
 
+	"ForeignDataWrapper": reflect.TypeFor[*ForeignDataWrapper](),
+	"ForeignServer":      reflect.TypeFor[*ForeignServer](),
+	"UserMapping":        reflect.TypeFor[*UserMapping](),
+	"ForeignTable":       reflect.TypeFor[*ForeignTable](),
+
 	"Function":  reflect.TypeFor[*Function](),
 	"Procedure": reflect.TypeFor[*Procedure](),
 	"Aggregate": reflect.TypeFor[*Aggregate](),
 }
 
 // sweepSkip names the context-only methods the sweep must not call because
-// they write, "<type>.<method>" → what the write does. None of pgmo's
-// context-only methods writes yet. A method classified wrongly has to be
+// they write, "<type>.<method>" → what the write does. A method classified wrongly has to be
 // visible at the point it is skipped, so the list lives here, in the test;
 // checkSweepKeys fails on an entry naming no method, so it cannot rot into
 // names that skip nothing.
-var sweepSkip = map[string]string{}
+var sweepSkip = map[string]string{
+	"Database.ResetAllParameters": "ALTER DATABASE … RESET ALL",
+	"Role.Drop":                   "DROP ROLE",
+	"Role.ClearPassword":          "ALTER ROLE … PASSWORD NULL",
+	"Role.ResetAllParameters":     "ALTER ROLE … RESET ALL",
+}
 
 // sweepNotReads names the exported context-first methods reflectSweep cannot
 // call that are not reads either, with why. Every other such method is a read
@@ -76,6 +85,32 @@ var sweepSkip = map[string]string{}
 var sweepNotReads = map[string]string{
 	"Server.InTransaction": "runs the caller's function in a transaction; sends nothing of its own but BEGIN/COMMIT",
 	"Server.OpenSession":   "dials a session for the caller; sends no statement",
+
+	// Database writes (database_write.go): CreateDatabase's read-back is
+	// DatabaseByName, swept on its own.
+	"Server.CreateDatabase":   "CREATE DATABASE, read back by DatabaseByName",
+	"Database.Drop":           "DROP DATABASE",
+	"Database.Rename":         "ALTER DATABASE … RENAME TO",
+	"Database.SetOwner":       "ALTER DATABASE … OWNER TO",
+	"Database.SetTablespace":  "ALTER DATABASE … SET TABLESPACE",
+	"Database.Alter":          "ALTER DATABASE … WITH",
+	"Database.SetParameter":   "ALTER DATABASE … SET",
+	"Database.ResetParameter": "ALTER DATABASE … RESET",
+
+	// Role writes (role_write.go): CreateRole's read-back is RoleByName,
+	// and a password's scram_iterations read passwordVerifier, both swept
+	// on their own.
+	"Server.CreateRole":               "CREATE ROLE, read back by RoleByName",
+	"Role.Rename":                     "ALTER ROLE … RENAME TO",
+	"Role.Alter":                      "ALTER ROLE … WITH",
+	"Role.SetPassword":                "ALTER ROLE … PASSWORD",
+	"Role.SetParameter":               "ALTER ROLE … SET",
+	"Role.SetDatabaseParameter":       "ALTER ROLE … IN DATABASE … SET",
+	"Role.ResetParameter":             "ALTER ROLE … RESET",
+	"Role.ResetDatabaseParameter":     "ALTER ROLE … IN DATABASE … RESET",
+	"Role.ResetAllDatabaseParameters": "ALTER ROLE … IN DATABASE … RESET ALL",
+	"Role.AddMember":                  "GRANT role TO member",
+	"Role.RemoveMember":               "REVOKE role FROM member",
 }
 
 // sweepReaders maps every function that sends a read — calls one of
@@ -148,6 +183,19 @@ var sweepReaders = map[string]string{
 	"Database.CastByTypes":     "Database.CastByTypes",
 	"Database.Operators":       "Database.Operators",
 	"Database.OperatorByName":  "Database.OperatorByName",
+
+	"Database.ForeignDataWrappers":      "Database.ForeignDataWrappers",
+	"Database.ForeignDataWrapperByName": "Database.ForeignDataWrapperByName",
+	"ForeignDataWrapper.Servers":        "ForeignDataWrapper.Servers",
+	"Database.ForeignServers":           "Database.ForeignServers",
+	"Database.ForeignServerByName":      "Database.ForeignServerByName",
+	"ForeignServer.UserMappings":        "ForeignServer.UserMappings",
+	"Database.UserMappings":             "Database.UserMappings",
+	"Database.UserMappingByName":        "Database.UserMappingByName",
+	"Database.ForeignTables":            "Database.ForeignTables",
+	"Database.ForeignTableByName":       "Database.ForeignTableByName",
+	"ForeignTable.Columns":              "ForeignTable.Columns",
+	"ForeignTable.Constraints":          "ForeignTable.Constraints",
 
 	// The text search families' shared readers, each driven through every
 	// family (sweepMustCall lists all four).
@@ -302,6 +350,26 @@ var sweepMustCall = []string{
 	"Database.CastByTypes",
 	"Database.Operators",
 	"Database.OperatorByName",
+
+	// The P4.12 families: wrappers, servers, user mappings and foreign
+	// tables (reflective on the scratch database and the fixture's
+	// objects, and by hand: each listing with a filter, each by-name read,
+	// a wrapper's servers, a server's user mappings — the options of each
+	// shown or withheld by role — and a foreign table's parts, its
+	// triggers through the read Table.Triggers shares).
+	"Database.ForeignDataWrappers",
+	"Database.ForeignDataWrapperByName",
+	"ForeignDataWrapper.Servers",
+	"Database.ForeignServers",
+	"Database.ForeignServerByName",
+	"ForeignServer.UserMappings",
+	"Database.UserMappings",
+	"Database.UserMappingByName",
+	"Database.ForeignTables",
+	"Database.ForeignTableByName",
+	"ForeignTable.Columns",
+	"ForeignTable.Constraints",
+	"ForeignTable.Triggers",
 
 	// The query fragments the P4 families will build their listings from.
 	// No read sends them yet, so the sweep runs each in a query of its own,

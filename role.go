@@ -144,8 +144,9 @@ func (r *Role) IsPredefined() bool {
 }
 
 // IsBootstrapSuperuser reports the superuser initdb created: it cannot be
-// dropped or lose SUPERUSER, and from 16 a superuser's grants are recorded
-// as made by it. Derived from OID, so false on a RoleRef.
+// dropped, from 16 cannot lose SUPERUSER (15 lets it), and from 16 a
+// superuser's grants are recorded as made by it. Derived from OID, so false
+// on a RoleRef.
 func (r *Role) IsBootstrapSuperuser() bool { return r.OID == bootstrapSuperuserID }
 
 // PasswordExpired reports whether ValidUntil is set and before now: the

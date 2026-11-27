@@ -67,7 +67,7 @@ type ParameterSetting struct {
 
 	// Value is the stored value, as SHOW reports it: a list parameter keeps
 	// its elements' quotes (search_path reads "$user", public). It is not a
-	// SQL literal; writing it back is the P4.13 writes' business.
+	// SQL literal: Values splits it as SetParameter takes it back.
 	Value string
 }
 

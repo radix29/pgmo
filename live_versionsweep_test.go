@@ -55,8 +55,14 @@ var sweepSchema = []string{
 	`CREATE MATERIALIZED VIEW app.parent_totals AS SELECT pg_catalog.count(*) AS n FROM app.parent`,
 	`CREATE UNIQUE INDEX parent_totals_n ON app.parent_totals (n)`,
 	`ALTER VIEW app.parent_names SET (security_barrier = on)`,
+	// The P4.12 families: a commented server with an option, PUBLIC's user
+	// mapping on it (its options withheld from the plain role), and a
+	// foreign table with a table option, a column option and a CHECK.
 	`CREATE SERVER sweep_remote FOREIGN DATA WRAPPER postgres_fdw OPTIONS (host 'sweep.invalid')`,
-	`CREATE FOREIGN TABLE app.remote (id integer) SERVER sweep_remote`,
+	`COMMENT ON SERVER sweep_remote IS 'sweep'`,
+	`CREATE USER MAPPING FOR PUBLIC SERVER sweep_remote OPTIONS (user 'sweep')`,
+	`CREATE FOREIGN TABLE app.remote (id integer OPTIONS (column_name 'ID') CHECK (id > 0)) SERVER sweep_remote
+	   OPTIONS (table_name 'r')`,
 	`CREATE SEQUENCE app.seq AS integer`,
 	// A sequence owned by a column, called once (its CACHE stores the fifth
 	// value), with a comment, and readable by PUBLIC, so the plain role's
@@ -299,6 +305,22 @@ func TestLiveVersionSweep(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	fdw, err := db.ForeignDataWrapperByName(ctx, "postgres_fdw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	remoteServer, err := db.ForeignServerByName(ctx, "sweep_remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mapping, err := db.UserMappingByName(ctx, "sweep_remote", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote, err := db.ForeignTableByName(ctx, "app", "remote")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	for _, role := range []string{"", plain} {
 		name := "connected role"
@@ -311,7 +333,8 @@ func TestLiveVersionSweep(t *testing.T) {
 				"View": view, "MaterializedView": matview, "Sequence": counter, "Type": mood, "Domain": code, "Function": touch, "Procedure": proc, "Aggregate": agg,
 				"Trigger": trig, "EventTrigger": evt, "Extension": citext,
 				"Tablespace": pgDefault, "Collation": sweepC, "TextSearchParser": tsParser, "TextSearchTemplate": tsTemplate,
-				"TextSearchDictionary": tsDict, "TextSearchConfiguration": tsConfig, "Language": lang, "Cast": cast, "Operator": op} {
+				"TextSearchDictionary": tsDict, "TextSearchConfiguration": tsConfig, "Language": lang, "Cast": cast, "Operator": op,
+				"ForeignDataWrapper": fdw, "ForeignServer": remoteServer, "UserMapping": mapping, "ForeignTable": remote} {
 				sw.reflectSweep(typeName, scratch, recv)
 			}
 			sweepServerReads(sw, scratch)
@@ -327,6 +350,7 @@ func TestLiveVersionSweep(t *testing.T) {
 			sweepTablespaces(sw)
 			sweepCatalogObjects(sw, db, mood.OID)
 			sweepTextSearch(sw, db)
+			sweepForeignData(sw, db)
 			sweepRoutineFamilies(sw, db)
 			sweepRoutines(sw)
 			sweepFragments(sw)
@@ -1147,6 +1171,164 @@ func sweepCatalogObjects(sw *sweep, db *Database, mood OID) {
 			return err
 		}
 		return checkOperator(o)
+	})
+}
+
+// sweepForeignData drives the wrapper, server, user mapping and foreign
+// table reads with an assertion on their rows, each on the fixture's
+// object: the listings narrowed to it, the by-name reads, a wrapper's
+// servers, a server's user mappings — PUBLIC's options shown to the
+// connected role, withheld from the plain one — and the foreign table's
+// parts.
+func sweepForeignData(sw *sweep, db *Database) {
+	checkWrapper := func(w *ForeignDataWrapper) error {
+		if w.OID == 0 || w.Name != "postgres_fdw" || w.Owner == "" || w.Origin != (Origin{Extension: "postgres_fdw"}) ||
+			w.Handler.Name != "postgres_fdw_handler" || w.Validator.Name != "postgres_fdw_validator" || w.Options != nil ||
+			!w.PrivilegesDefault || len(w.Privileges) != 1 || w.Database() != db {
+			return fmt.Errorf("%+v: want postgres_fdw's, its handler and validator", w)
+		}
+		return nil
+	}
+	sw.call("Database.ForeignDataWrappers(postgres_fdw)", func(ctx context.Context) error {
+		ws, err := db.ForeignDataWrappers(ctx, ObjectFilter{Name: []TextCriterion{{TextEquals, "postgres_fdw"}}, ExtensionMember: new(true)})
+		if err != nil {
+			return err
+		}
+		if len(ws) != 1 {
+			return fmt.Errorf("%d wrappers, want postgres_fdw alone", len(ws))
+		}
+		return checkWrapper(ws[0])
+	})
+	sw.call("Database.ForeignDataWrapperByName(postgres_fdw)", func(ctx context.Context) error {
+		w, err := db.ForeignDataWrapperByName(ctx, "postgres_fdw")
+		if err != nil {
+			return err
+		}
+		return checkWrapper(w)
+	})
+	checkServer := func(s *ForeignServer) error {
+		if s.OID == 0 || s.Name != "sweep_remote" || s.Owner == "" || s.Origin != (Origin{}) || s.Wrapper != "postgres_fdw" ||
+			s.Type != "" || s.Version != "" || !reflect.DeepEqual(s.Options, []ParameterSetting{{"host", "sweep.invalid"}}) ||
+			!s.PrivilegesDefault || len(s.Privileges) != 1 || s.Comment != "sweep" || s.Database() != db {
+			return fmt.Errorf("%+v: want sweep_remote on postgres_fdw, its host, commented", s)
+		}
+		return nil
+	}
+	sw.call("Database.ForeignServers(sweep_remote)", func(ctx context.Context) error {
+		no := false
+		ss, err := db.ForeignServers(ctx, ObjectFilter{System: &no, ExtensionMember: &no})
+		if err != nil {
+			return err
+		}
+		if len(ss) != 1 {
+			return fmt.Errorf("%d servers, want sweep_remote alone", len(ss))
+		}
+		return checkServer(ss[0])
+	})
+	sw.call("Database.ForeignServerByName(sweep_remote)", func(ctx context.Context) error {
+		s, err := db.ForeignServerByName(ctx, "sweep_remote")
+		if err != nil {
+			return err
+		}
+		return checkServer(s)
+	})
+	sw.call("ForeignDataWrapper.Servers(postgres_fdw)", func(ctx context.Context) error {
+		ss, err := db.ForeignDataWrapperRef("postgres_fdw").Servers(ctx)
+		if err != nil {
+			return err
+		}
+		if len(ss) != 1 {
+			return fmt.Errorf("%d servers, want sweep_remote alone", len(ss))
+		}
+		return checkServer(ss[0])
+	})
+	checkMapping := func(m *UserMapping) error {
+		want := []ParameterSetting{{"user", "sweep"}}
+		if sw.role != "" {
+			want = nil
+		}
+		if m.OID == 0 || m.ServerOID == 0 || m.Server != "sweep_remote" || m.UserOID != 0 || !m.IsPublic() ||
+			m.Origin != (Origin{}) || !reflect.DeepEqual(m.Options, want) || m.OptionsHidden != (sw.role != "") || m.Database() != db {
+			return fmt.Errorf("%+v: want PUBLIC's on sweep_remote, options %v", m, want)
+		}
+		return nil
+	}
+	sw.call("Database.UserMappings(sweep_remote)", func(ctx context.Context) error {
+		ms, err := db.UserMappings(ctx, ObjectFilter{System: new(bool)})
+		if err != nil {
+			return err
+		}
+		if len(ms) != 1 {
+			return fmt.Errorf("%d user mappings, want PUBLIC's alone", len(ms))
+		}
+		return checkMapping(ms[0])
+	})
+	sw.call("Database.UserMappingByName(sweep_remote, PUBLIC)", func(ctx context.Context) error {
+		m, err := db.UserMappingByName(ctx, "sweep_remote", "")
+		if err != nil {
+			return err
+		}
+		return checkMapping(m)
+	})
+	sw.call("ForeignServer.UserMappings(sweep_remote)", func(ctx context.Context) error {
+		ms, err := db.ForeignServerRef("sweep_remote").UserMappings(ctx)
+		if err != nil {
+			return err
+		}
+		if len(ms) != 1 {
+			return fmt.Errorf("%d user mappings, want PUBLIC's alone", len(ms))
+		}
+		return checkMapping(ms[0])
+	})
+	checkTable := func(t *ForeignTable) error {
+		if t.OID == 0 || t.Schema != "app" || t.Name != "remote" || t.Owner == "" || t.Origin != (Origin{}) ||
+			t.Server != "sweep_remote" || !reflect.DeepEqual(t.Options, []ParameterSetting{{"table_name", "r"}}) ||
+			t.IsPartition || t.PartitionBound != "" || t.Parents != nil || !t.PrivilegesDefault || t.Comment != "" || t.Database() != db {
+			return fmt.Errorf("%+v: want app.remote on sweep_remote, its table option", t)
+		}
+		return nil
+	}
+	var remote *ForeignTable
+	sw.call("Database.ForeignTables(app)", func(ctx context.Context) error {
+		ts, err := db.ForeignTables(ctx, ObjectFilter{Schema: []TextCriterion{{TextEquals, "app"}}})
+		if err != nil {
+			return err
+		}
+		if len(ts) != 1 {
+			return fmt.Errorf("%d foreign tables, want app.remote alone", len(ts))
+		}
+		return checkTable(ts[0])
+	})
+	sw.call("Database.ForeignTableByName(app.remote)", func(ctx context.Context) error {
+		t, err := db.ForeignTableByName(ctx, "app", "remote")
+		if err == nil {
+			remote, err = t, checkTable(t)
+		}
+		return err
+	})
+	if remote == nil {
+		return
+	}
+	sw.call("ForeignTable.Columns(app.remote)", func(ctx context.Context) error {
+		cs, err := remote.Columns(ctx)
+		if err == nil && (len(cs) != 1 || cs[0].Name != "id" || !reflect.DeepEqual(cs[0].FDWOptions, []ParameterSetting{{"column_name", "ID"}})) {
+			err = fmt.Errorf("%+v: want id, its column_name option", cs)
+		}
+		return err
+	})
+	sw.call("ForeignTable.Constraints(app.remote)", func(ctx context.Context) error {
+		cs, err := remote.Constraints(ctx)
+		if err == nil && (len(cs) != 1 || cs[0].Name != "remote_id_check") {
+			err = fmt.Errorf("%+v: want remote_id_check alone", cs)
+		}
+		return err
+	})
+	sw.call("ForeignTable.Triggers(app.remote)", func(ctx context.Context) error {
+		ts, err := remote.Triggers(ctx)
+		if err == nil && len(ts) != 0 {
+			err = fmt.Errorf("%d triggers, want none", len(ts))
+		}
+		return err
 	})
 }
 

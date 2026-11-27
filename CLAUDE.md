@@ -68,7 +68,21 @@ Module `github.com/radix29/pgmo`, MIT.
   parsers, templates, dictionaries and configurations in
   `text_search.go`; `Languages`, `LanguageByName`, `LanguageRef` in
   `language.go`; `Casts`, `CastByTypes`, `CastRef` in `cast.go`;
-  `Operators`, `OperatorByName`, `OperatorRef` in `operator.go`).
+  `Operators`, `OperatorByName`, `OperatorRef` in `operator.go`; P4.12's
+  reads — `ForeignDataWrappers`, `ForeignServers`, `UserMappings` (from
+  `pg_user_mappings`, `OptionsHidden`) with their by-name reads, Refs,
+  `ForeignDataWrapper.Servers` and `ForeignServer.UserMappings` in
+  `foreign_data.go`; `ForeignTables`, `ForeignTableByName`,
+  `ForeignTableRef` and a foreign table's `Columns`, `Constraints`,
+  `Triggers` in `foreign_table.go`; `Column.FDWOptions`; P4.13 started:
+  the database writes `CreateDatabase`, `Database.Drop` (`Force` opt-in),
+  `Rename`, `SetOwner`, `SetTablespace`, `Alter`, `SetParameter`,
+  `ResetParameter`, `ResetAllParameters` and `ParameterSetting.Values` in
+  `database_write.go`, `releaseDatabase` in `database_pools.go`, the first
+  `script_*_write_test.go`; the role writes `CreateRole`, `Role.Drop`,
+  `Rename`, `Alter` (`RoleAttributes`), `SetPassword`, `ClearPassword`,
+  the role and role-in-database `SetParameter`/`Reset…` forms,
+  `AddMember`/`RemoveMember` in `role_write.go`).
   The plan for pgmo *and* pgMS is
   `~/go/pgms/docs/PLAN.md` (`docs/PLAN.md` here points to it); pgmo owns
   phases P1–P6 and shares P14–P16.

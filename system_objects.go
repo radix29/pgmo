@@ -90,6 +90,9 @@ const (
 	catalogTSDict     catalogTable = "pg_catalog.pg_ts_dict"     // text search dictionaries
 	catalogTSParser   catalogTable = "pg_catalog.pg_ts_parser"   // text search parsers
 	catalogTSTemplate catalogTable = "pg_catalog.pg_ts_template" // text search templates
+
+	catalogForeignDataWrapper catalogTable = "pg_catalog.pg_foreign_data_wrapper" // foreign data wrappers
+	catalogForeignServer      catalogTable = "pg_catalog.pg_foreign_server"       // foreign servers
 )
 
 // extensionMembership is the condition on pg_depend d that it is the row

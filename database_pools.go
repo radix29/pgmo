@@ -414,3 +414,30 @@ func (d databaseQuerier) Begin(ctx context.Context) (pgx.Tx, error) {
 type errRow struct{ err error }
 
 func (r errRow) Scan(...any) error { return r.err }
+
+// releaseDatabase closes the Server's own Querier on database name when it is
+// idle, so a statement that needs the database free of sessions — DROP
+// DATABASE, ALTER DATABASE … RENAME TO and SET TABLESPACE — does not find one
+// of pgmo's idle pooled connections in the way. The next statement on name
+// opens afresh. One in use (a lease, an open Rows, a transaction) is left
+// as it is: it is a session the caller holds, and the server reports it as
+// any other. A database whose pool is still opening is left too. Under
+// WithScript nothing is closed, since nothing runs.
+//
+// The server waits up to five seconds for a backend to exit before it
+// counts it as connected, so the closed pool's sessions ending a moment
+// after Close returns does not fail the statement.
+func (s *Server) releaseDatabase(ctx context.Context, name string) {
+	if Scripting(ctx) {
+		return
+	}
+	s.mu.Lock()
+	p, ok := s.pools[name]
+	if !ok || p.q == nil || !p.idle() {
+		s.mu.Unlock()
+		return
+	}
+	delete(s.pools, name)
+	s.mu.Unlock()
+	releaseQuerier(p.q)
+}
