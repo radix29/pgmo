@@ -35,7 +35,7 @@ var (
 	indexTypes = []uint32{pgtype.OIDOID, pgtype.TextOID, pgtype.TextOID, pgtype.TextOID,
 		pgtype.BoolOID, pgtype.BoolOID, pgtype.BoolOID, pgtype.BoolOID, pgtype.BoolOID, pgtype.BoolOID,
 		pgtype.TextArrayOID, pgtype.TextArrayOID, pgtype.TextOID, pgtype.TextOID, pgtype.TextOID,
-		pgtype.TextArrayOID, pgtype.TextOID}
+		pgtype.TextArrayOID, pgtype.TextOID, pgtype.TextOID, pgtype.TextOID}
 	policyTypes = []uint32{pgtype.OIDOID, pgtype.TextOID, pgtype.TextOID, pgtype.TextOID, pgtype.TextOID, pgtype.BoolOID, pgtype.TextArrayOID,
 		pgtype.TextOID, pgtype.TextOID, pgtype.TextOID}
 	childTypes = []uint32{pgtype.OIDOID, pgtype.TextOID, pgtype.TextOID, pgtype.TextOID, pgtype.TextOID, pgtype.BoolOID}
@@ -380,9 +380,9 @@ func TestTableIndexes(t *testing.T) {
 		"FROM pg_catalog.pg_index i": rowsOf(indexTypes,
 			[]any{uint32(50001), "kid_expr", "CREATE INDEX kid_expr ON app.kid USING gist (b) INCLUDE (c) WHERE (a > 0)", "gist",
 				true, true, true, true, true, false, []string{"lower(b::text)", "a"}, []string{"c"}, "a > 0", "kid_pk", "fast",
-				[]string{"fillfactor=80"}, "idx"},
+				[]string{"fillfactor=80"}, "idx", "app", "mom_expr"},
 			[]any{uint32(50002), "plain", "CREATE INDEX plain ON app.kid USING btree (a)", "btree",
-				false, false, false, false, false, true, []string{"a"}, []string{}, "", "", "", nil, ""}),
+				false, false, false, false, false, true, []string{"a"}, []string{}, "", "", "", nil, "", "", ""}),
 	})
 	xs, err := tb.Indexes(t.Context())
 	if err != nil {
@@ -392,19 +392,21 @@ func TestTableIndexes(t *testing.T) {
 		{OID: 50001, Name: "kid_expr", Definition: "CREATE INDEX kid_expr ON app.kid USING gist (b) INCLUDE (c) WHERE (a > 0)", Method: "gist",
 			Unique: true, Primary: true, Exclusion: true, NullsNotDistinct: true, Clustered: true,
 			KeyColumns: []string{"lower(b::text)", "a"}, IncludedColumns: []string{"c"}, Predicate: "a > 0", Constraint: "kid_pk",
-			Tablespace: "fast", Options: []pgmo.ParameterSetting{{Name: "fillfactor", Value: "80"}}, Comment: "idx"},
+			Tablespace: "fast", Options: []pgmo.ParameterSetting{{Name: "fillfactor", Value: "80"}}, Comment: "idx",
+			Parent: pgmo.ObjectName{Schema: "app", Name: "mom_expr"}},
 		{OID: 50002, Name: "plain", Definition: "CREATE INDEX plain ON app.kid USING btree (a)", Method: "btree", Valid: true,
 			KeyColumns: []string{"a"}},
 	}
 	if len(xs) != 2 || !reflect.DeepEqual(*xs[0], want[0]) || !reflect.DeepEqual(*xs[1], want[1]) {
 		t.Errorf("Indexes =\n%+v\n%+v\nwant\n%+v", xs[0], xs[1], want)
 	}
-	if n := reflect.TypeFor[pgmo.Index]().NumField(); n != 17 {
-		t.Errorf("Index has %d fields; this test checks 17 — add the new one", n)
+	if n := reflect.TypeFor[pgmo.Index]().NumField(); n != 18 {
+		t.Errorf("Index has %d fields; this test checks 18 — add the new one", n)
 	}
 	last := lastQuery(other)
 	for _, w := range []string{"pg_catalog.generate_series(1, i.indnkeyatts)", "pg_catalog.generate_series(i.indnkeyatts + 1, i.indnatts)",
-		"AND co.contype IN ('p', 'u', 'x')", "WHERE i.indrelid = $1\nORDER BY ic.relname"} {
+		"AND co.contype IN ('p', 'u', 'x')", "LEFT JOIN pg_catalog.pg_inherits ih ON ih.inhrelid = i.indexrelid",
+		"WHERE i.indrelid = $1\nORDER BY ic.relname"} {
 		if !strings.Contains(last.Text, w) {
 			t.Errorf("no %q in\n%s", w, last.Text)
 		}

@@ -368,7 +368,7 @@ func TestViewParts(t *testing.T) {
 				"p", int32(-1), true, int32(0), []string{"B b"}, []string{"own"}, []string{"INSERT"}, []bool{false}, []string{}, "key"}),
 		"FROM pg_catalog.pg_index i": rowsOf(indexTypes,
 			[]any{uint32(50001), "totals_n", "CREATE UNIQUE INDEX totals_n ON app.totals USING btree (n)", "btree",
-				true, false, false, false, false, true, []string{"n"}, []string{}, "", "", "", nil, ""}),
+				true, false, false, false, false, true, []string{"n"}, []string{}, "", "", "", nil, "", "", ""}),
 		"pg_catalog.pg_table_size(c.oid)": rowsOf(sizeTypes, []any{int64(8192), int64(16384), int64(24576)}),
 	})
 	wantCol := pgmo.Column{Number: 1, Name: "id", TypeOID: 23, Type: "integer", Default: "7", Storage: pgmo.StoragePlain,

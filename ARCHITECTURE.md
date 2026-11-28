@@ -1538,7 +1538,7 @@ none:
 |---|---|---|
 | `Columns` → `[]*Column` | `pg_attribute` (`attnum > 0`, not dropped) + `pg_attrdef`, `pg_type`, `pg_collation`, `attacl` | `Type` is `format_type(atttypid, atttypmod)` for a `pg_catalog` type and schema-qualified otherwise (the element's schema for an array), whatever the path; `Default` vs `GenerationExpression` split on `attgenerated` (`v`, virtual, 18+); `Collation` only when not the type's own (psql's rule); `StatisticsTarget` `COALESCE(attstattarget, -1)` — the column is `int4` on 15–16 and a nullable `int2` from 17, the same read on both; `IsLocal`/`InheritCount`; the column ACL with no default (NULL is none) |
 | `Constraints` → `[]*Constraint` | `pg_constraint` (`contype <> 't'`) | `pg_get_constraintdef`; `conkey`/`confkey` named in key order; `Enforced` is `conenforced` from 18 and `true` before (`colSince`, golden `constraint.sql`); 18's NOT NULL rows (`contype 'n'`) are listed; `Index` for `p`/`u`/`x`; FK actions and match type as `ForeignKeyAction`/`ForeignKeyMatch`, empty for other kinds |
-| `Indexes` → `[]*Index` | `pg_index` + `pg_class`, `pg_am`, `pg_constraint`, `pg_tablespace` | `pg_get_indexdef` (table always qualified); `KeyColumns`/`IncludedColumns` per column from `pg_get_indexdef(oid, k, true)` over `indnkeyatts`/`indnatts`; `Predicate`; `Valid`; `NullsNotDistinct` (15); `Constraint` it enforces |
+| `Indexes` → `[]*Index` | `pg_index` + `pg_class`, `pg_am`, `pg_constraint`, `pg_tablespace`, `pg_inherits` | `pg_get_indexdef` (table always qualified); `KeyColumns`/`IncludedColumns` per column from `pg_get_indexdef(oid, k, true)` over `indnkeyatts`/`indnatts`; `Predicate`; `Valid`; `NullsNotDistinct` (15); `Constraint` it enforces; `Parent`, the partitioned index a partition's is attached to (P5.1) |
 | `Triggers` → `[]*Trigger` | `pg_trigger` (`NOT tgisinternal`) + `pg_proc` | the trigger family's read keyed by the table's OID (§ Triggers and event triggers) |
 | `Policies` → `[]*Policy` | `pg_policy` | `Schema`/`Table` (the table's), `Command`, `Permissive`, `Roles` in stored order (PUBLIC `""`), `Using`/`WithCheck`; one by name: `Database.PolicyByName(schema, table, name)`, `PolicyRef` (P4.13.4) |
 | `Children` → `[]ChildTable` | `pg_inherits` (`inhparent = oid`) | direct only; `Kind` may be a foreign table; `PartitionBound`, `DetachPending` |
@@ -1988,7 +1988,10 @@ below `jit_above_cost`.
   `acldefault('l', owner)`.
 - **Casts** (`cast.go`): `Database.Casts`, `CastByTypes(ctx, source,
   target OID)`, `CastRef(source, target string)`, `Cast.Signature()` →
-  `(source AS target)`. A cast has no name, schema or owner: the filter's
+  `(source AS target)`; `FunctionArguments` (P5.1, `typeName` over the
+  function's `proargtypes`, one grouped read `castFunctionArguments`) and
+  `FunctionSignature()` name the conversion function as `CREATE CAST …
+  WITH FUNCTION` takes it. A cast has no name, schema or owner: the filter's
   Name and Schema criteria are ignored, System is `oid < 16384`.
   `Source`/`Target` are `typeName` (§ Identity): qualified outside
   pg_catalog whatever the `search_path`. **`CREATE TYPE … AS RANGE` makes
@@ -2295,6 +2298,84 @@ object's `Dependencies`/`Dependents` checked edge for edge against
 REASSIGN/DROP OWNED read back; green on pg15–pg18. Sweep:
 `sweepDependencies`. 30 mutations: 29 caught, 1 equivalent (a "root is not
 the object" guard `parts` already ensures; removed).
+
+### Scripter (`scripter*.go`)
+
+Landed P5.1. **`NewScripter(db, ScriptOptions)`** writes the DDL of one
+object of a database per call, **`NewServerScripter(s, opts)`** of a role
+or a tablespace; each `Script…` method returns the script as text and runs
+nothing. gosmo's shape: a verb, options, one method per family named by the
+object's identity — schema and name, a routine's argument type OIDs
+(`ScriptFunction(ctx, schema, name, args)`), a cast's two type OIDs, an
+operator's operand types, a table's part by table and name.
+
+| Method | Writes |
+|---|---|
+| `ScriptSchema` | `CREATE SCHEMA`; default privileges `IN SCHEMA` |
+| `ScriptTable` | `CREATE TABLE` (columns through `ColumnSpec.definition`, validated non-FK constraints inline, `INHERITS` / `PARTITION OF … FOR VALUES`, `PARTITION BY`, `WITH`, `TABLESPACE`); then FKs and `NOT VALID` constraints as `ALTER TABLE [ONLY] … ADD CONSTRAINT`, `SET STATISTICS`, indexes, `CLUSTER ON`, RLS and policies, triggers and their state, column ACLs |
+| `ScriptView`, `ScriptMaterializedView`, `ScriptForeignTable` | `CREATE [OR REPLACE] VIEW … AS` `pg_get_viewdef`; column defaults; `WITH [NO] DATA` by `Populated`; FDW `OPTIONS` per column and table |
+| `ScriptIndex`, `ScriptConstraint`, `ScriptTrigger`, `ScriptPolicy` | one part of a table (`ErrInvalidRequest` for a constraint's or an attached index, an inherited constraint, a partition's copy of a trigger) |
+| `ScriptFunction`, `ScriptProcedure`, `ScriptAggregate` | `pg_get_functiondef` (its `OR REPLACE` kept only under `ScriptAlter`); `CREATE AGGREGATE` from `pg_aggregate`, each option only when not the default |
+| `ScriptSequence`, `ScriptType`, `ScriptDomain` | every option stated; `OWNED BY` as `ALTER SEQUENCE`; enum, composite, range, base and shell types; domain constraints `pg_get_constraintdef`, `NOT VALID` ones after |
+| `ScriptExtension`, `ScriptEventTrigger`, `ScriptCollation`, `ScriptTextSearch{Parser,Template,Dictionary,Configuration}`, `ScriptLanguage`, `ScriptCast`, `ScriptOperator`, `ScriptForeignDataWrapper`, `ScriptForeignServer`, `ScriptUserMapping` | built from the P4.9–P4.12 fields |
+| `ScriptDatabase` | `CREATE DATABASE … TEMPLATE = template0` through `createDatabaseStatement`; `ALTER DATABASE … SET` |
+| `ServerScripter.ScriptRole`, `ScriptTablespace` | every attribute stated; settings, memberships both ways (`grantMembershipStatement`, options by release); in-place tablespace as `LOCATION ''` |
+
+- **Verbs** (`ScriptVerb`): CREATE (the object and what restates the
+  rest: owner, comments, ACL, a table's parts); DROP alone; DROP AND CREATE
+  — an error writing the CREATE discards the DROP; ALTER = `CREATE OR
+  REPLACE` for views, functions, procedures, aggregates, triggers (not a
+  constraint trigger) and languages, CREATE for every other kind.
+- **`ScriptOptions`**: `SchemaQualify`, `IncludeOwner`, `IncludeComments`,
+  `IncludePrivileges`, `IfExists` (DROP), `IfNotExists` (only where
+  PostgreSQL's CREATE has it; no DO-block guard), `Cascade` (not on a
+  database, role, tablespace or user mapping). `DefaultScriptOptions` is
+  CREATE, qualified, with owner, comments and privileges.
+- **Fixed rendering** (`renderIn`): every method reads its object in a
+  transaction of its own on the object's database, after `renderSettings`
+  pins `search_path` (bound as `$1`), `standard_conforming_strings`,
+  `DateStyle`, `IntervalStyle` and `extra_float_digits` with `set_config(…,
+  true)`, and rolls it back — so `pg_get_*` text is the same in any session,
+  as `pg_dump` does. `search_path` is `pg_catalog, pg_temp` when qualifying,
+  the object's schema first otherwise (names in it then rendered bare, as
+  the object's own). The context carries the transaction as a `serverTx`
+  whose `database` is the scripted one: `onDatabase` routes that database's
+  reads to it, `on` leaves the Server's own database's (roles) on `s.q`.
+  Inside the caller's `InTransaction` on the same database it is a
+  savepoint (`SET LOCAL` undone by the rollback to it), seeing the
+  transaction's uncommitted DDL; another database there is `ErrUnsupported`.
+  `ScriptDatabase` reads on the Server's own database, so a database
+  refusing connections is scripted too.
+- **ACLs** (`scripter_acl.go`): restated from the kind's `acldefault`, as
+  `pg_dump`: REVOKE ALL from PUBLIC or the owner when a default privilege
+  is gone, then GRANTs of the rest, `WITH GRANT OPTION` apart; nothing for
+  an ACL never set. Column ACLs are GRANTs. Grantors are not restated.
+- **Not DDL, never written**: an extension member (a `-- … is a member of
+  extension …` note whatever the verb), an identity sequence and a
+  multirange (a note naming their owner), a role's password (a note), a
+  user mapping's `password` option (`PasswordPlaceholder`, unquoted).
+  A pseudo-type, a built-in language, the default collation and a
+  data-directory tablespace are `ErrInvalidRequest`.
+- **Script text** (`scriptText`): statements terminated as
+  `ScriptCollector.String` does (`terminated`), notes as `--` lines through
+  `CommentSafe`, a blank line between items.
+
+Tests: `scripter_internal_test.go` (every builder: verbs, clauses, ACL
+diffs by release, `topLevelKeyword`, indexes, types, aggregates, routine
+headers, policies, triggers, FDW options, the password placeholder,
+collations, casts, memberships); `scripter_test.go` over `pgmotest` (the
+render transaction's statements and `$1`, rollback on a failed read, the
+savepoint inside `InTransaction`, another database refused).
+`TestLiveScripter` scripts one object of 46 kinds and shapes in a
+throwaway database, replays the scripts into it emptied, and requires
+every script to come back byte-identical; then DROP AND CREATE with
+CASCADE run in place, scripted again identical; then the DROPs in
+reverse leave nothing. `TestLiveScripterServerObjects` round-trips a role,
+an in-place tablespace and a database; `TestLiveScripterInTransaction`
+scripts an uncommitted table and checks the caller's `search_path` after.
+Green on pg15–pg18. An ad-hoc `pg_dump --schema-only` of the fixture
+before and after the replay differed only in the lab's own `attoptions`
+(pg15, pg18) — P5.4 makes that the standing oracle.
 
 ### Version sweep (`live_versionsweep_test.go`)
 

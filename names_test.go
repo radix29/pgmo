@@ -51,8 +51,9 @@ func TestMatchName(t *testing.T) {
 // caseFoldingAllowed names, by "file:function", the code that folds case on
 // purpose, each with why the text it folds is not an object name.
 var caseFoldingAllowed = map[string]string{
-	"connection_dsn.go:validateParams": "runtime parameter (GUC) and connection keyword names are case-insensitive to the server; they are not catalog names",
-	"object_write.go:keywordLabel":     "a statement's object-type keyword (TABLE, MATERIALIZED VIEW) lowered for an error message; SQL grammar, not a name",
+	"connection_dsn.go:validateParams":     "runtime parameter (GUC) and connection keyword names are case-insensitive to the server; they are not catalog names",
+	"object_write.go:keywordLabel":         "a statement's object-type keyword (TABLE, MATERIALIZED VIEW) lowered for an error message; SQL grammar, not a name",
+	"scripter_relation.go:topLevelKeyword": "finds a SQL keyword (WHERE, ON ONLY) in the code of server-rendered DDL, outside quoted names; SQL grammar, not a name",
 }
 
 // caseFoldingDirs are the directories whose non-test Go files and SQL the

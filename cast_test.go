@@ -16,7 +16,7 @@ import (
 // them.
 var castTypes = []uint32{pgtype.OIDOID, pgtype.BoolOID, pgtype.TextOID,
 	pgtype.OIDOID, pgtype.TextOID, pgtype.OIDOID, pgtype.TextOID,
-	pgtype.TextArrayOID, pgtype.TextOID, pgtype.TextOID, pgtype.TextOID}
+	pgtype.TextArrayOID, pgtype.TextArrayOID, pgtype.TextOID, pgtype.TextOID, pgtype.TextOID}
 
 // castMatch tells the cast read apart in a fake.
 const castMatch = "FROM pg_catalog.pg_cast ca"
@@ -25,17 +25,17 @@ const castMatch = "FROM pg_catalog.pg_cast ca"
 var (
 	rowCast1 = []any{uint32(10001), true, "citext",
 		uint32(20), "bigint", uint32(23), "integer",
-		[]string{"pg_catalog", "int4"}, "a", "f", "narrowing"}
+		[]string{"pg_catalog", "int4"}, []string{"bigint"}, "a", "f", "narrowing"}
 	rowCast2 = []any{uint32(70003), false, "",
 		uint32(70010), `app."Mood"`, uint32(25), "text",
-		[]string{}, "i", "i", ""}
+		[]string{}, nil, "i", "i", ""}
 )
 
 // The rows above as Casts, without their Database.
 var wantCasts = []pgmo.Cast{
 	{Origin: pgmo.Origin{IsSystem: true, Extension: "citext"}, OID: 10001, SourceType: 20, TargetType: 23,
 		Source: "bigint", Target: "integer", Function: pgmo.ObjectName{Schema: "pg_catalog", Name: "int4"},
-		Context: pgmo.CastAssignment, Method: pgmo.CastByFunction, Comment: "narrowing"},
+		FunctionArguments: []string{"bigint"}, Context: pgmo.CastAssignment, Method: pgmo.CastByFunction, Comment: "narrowing"},
 	{OID: 70003, SourceType: 70010, TargetType: 25, Source: `app."Mood"`, Target: "text",
 		Context: pgmo.CastImplicit, Method: pgmo.CastByInOut},
 }
@@ -54,8 +54,8 @@ func checkCasts(t *testing.T, got []*pgmo.Cast, d *pgmo.Database) {
 			t.Errorf("[%d] =\n%+v\nwant\n%+v", i, g, wantCasts[i])
 		}
 	}
-	if n := reflect.TypeFor[pgmo.Cast]().NumField(); n != 11 {
-		t.Errorf("Cast has %d fields; this test checks 11 — add the new one", n)
+	if n := reflect.TypeFor[pgmo.Cast]().NumField(); n != 12 {
+		t.Errorf("Cast has %d fields; this test checks 12 — add the new one", n)
 	}
 }
 

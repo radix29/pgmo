@@ -21,9 +21,15 @@ type txCtxKey struct{}
 // under WithScript, which only marks fn's context as inside a transaction —
 // so nesting and refuseInTx refuse as they would for real — while its
 // statements are captured and its reads go to the Server's own Querier.
+//
+// database is the database tx's session is bound to: the Server's own for
+// InTransaction, and the scripted database for a Scripter's rendering
+// transaction (scripter.go), which reads one database under fixed settings.
+// Only statements on that database run on tx.
 type serverTx struct {
-	server *Server
-	tx     pgx.Tx
+	server   *Server
+	tx       pgx.Tx
+	database string
 }
 
 // txFrom is ctx's transaction on s, or nil: none, or one on another Server,
@@ -128,7 +134,7 @@ func (s *Server) InTransaction(ctx context.Context, fn func(ctx context.Context)
 			cancel()
 		}
 	}()
-	if err := fn(context.WithValue(bctx, txCtxKey{}, &serverTx{server: s, tx: tx})); err != nil {
+	if err := fn(context.WithValue(bctx, txCtxKey{}, &serverTx{server: s, tx: tx, database: s.database})); err != nil {
 		return err
 	}
 	// pgx would not send a COMMIT on an ended context and would close the
@@ -159,7 +165,7 @@ func (s *Server) scriptTransaction(ctx context.Context, fn func(ctx context.Cont
 		// Captured, never sent: it cannot fail.
 		_, _ = s.exec(ctx, end)
 	}()
-	if err := fn(context.WithValue(ctx, txCtxKey{}, &serverTx{server: s})); err != nil {
+	if err := fn(context.WithValue(ctx, txCtxKey{}, &serverTx{server: s, database: s.database})); err != nil {
 		return err
 	}
 	end = "COMMIT"
@@ -168,9 +174,10 @@ func (s *Server) scriptTransaction(ctx context.Context, fn func(ctx context.Cont
 
 // on is what a statement of s with ctx runs on: ctx's transaction on s
 // inside InTransaction, s's own Querier otherwise — and under WithScript,
-// where the transaction is only captured.
+// where the transaction is only captured, and inside a Scripter's rendering
+// transaction on another database, whose session is not s's own.
 func (s *Server) on(ctx context.Context) Querier {
-	if t := txFrom(ctx, s); t != nil && t.tx != nil {
+	if t := txFrom(ctx, s); t != nil && t.tx != nil && t.database == s.database {
 		return t.tx
 	}
 	return s.q
@@ -186,10 +193,12 @@ func (s *Server) onDatabase(ctx context.Context, name string) (Querier, error) {
 	switch {
 	case t == nil:
 		return s.DatabaseQuerier(name), nil
-	case name == s.database:
-		return s.on(ctx), nil
+	case name == t.database && t.tx != nil:
+		return t.tx, nil
+	case name == t.database:
+		return s.q, nil // under WithScript: reads go to the Server's own Querier
 	}
-	return nil, unsupportedf("pgmo: database %q: not reachable inside InTransaction, whose session is bound to database %q", name, s.database)
+	return nil, unsupportedf("pgmo: database %q: not reachable inside InTransaction, whose session is bound to database %q", name, t.database)
 }
 
 // refuseInTx is the ErrUnsupported refusal of op — a statement PostgreSQL

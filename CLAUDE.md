@@ -105,7 +105,10 @@ Module `github.com/radix29/pgmo`, MIT.
   `Dependents` and `Server.Dependencies`/`Dependents`/`DependentDatabases`
   in `dependency.go`, every handle's `Address()` in `object_address.go`,
   `Database.Search`/`SearchDefinitions` in `search.go`,
-  `Database.ReassignOwned`/`DropOwned` in `role_write.go`).
+  `Database.ReassignOwned`/`DropOwned` in `role_write.go`; P5 started:
+  P5.1's `Scripter`/`ServerScripter`, `ScriptOptions`, `ScriptVerb` and
+  every family's `Script…` in `scripter*.go`, reading under fixed settings
+  through `renderIn`).
   The plan for pgmo *and* pgMS is
   `~/go/pgms/docs/PLAN.md` (`docs/PLAN.md` here points to it); pgmo owns
   phases P1–P6 and shares P14–P16.

@@ -69,6 +69,11 @@ type Index struct {
 
 	// Comment is COMMENT ON INDEX's text, empty for none.
 	Comment string
+
+	// Parent is the partitioned table's index this one is attached to — a
+	// partition's own index for its parent's (pg_inherits), created and
+	// dropped with it; zero for none.
+	Parent ObjectName
 }
 
 // indexColumns is pg_get_indexdef's rendering of the index i's columns
@@ -88,13 +93,17 @@ var indexesQuery = `SELECT i.indexrelid, ic.relname::pg_catalog.text, pg_catalog
 	COALESCE(co.conname::pg_catalog.text, ''),
 	COALESCE(ts.spcname::pg_catalog.text, ''),
 	ic.reloptions,
-	COALESCE(pg_catalog.obj_description(i.indexrelid, 'pg_class'), '')
+	COALESCE(pg_catalog.obj_description(i.indexrelid, 'pg_class'), ''),
+	COALESCE(pn.nspname::pg_catalog.text, ''), COALESCE(pc.relname::pg_catalog.text, '')
 FROM pg_catalog.pg_index i
 JOIN pg_catalog.pg_class ic ON ic.oid = i.indexrelid
 JOIN pg_catalog.pg_am am ON am.oid = ic.relam
 LEFT JOIN pg_catalog.pg_constraint co ON co.conindid = i.indexrelid AND co.conrelid = i.indrelid
 	AND co.contype IN ('p', 'u', 'x')
 LEFT JOIN pg_catalog.pg_tablespace ts ON ts.oid = ic.reltablespace
+LEFT JOIN pg_catalog.pg_inherits ih ON ih.inhrelid = i.indexrelid
+LEFT JOIN pg_catalog.pg_class pc ON pc.oid = ih.inhparent
+LEFT JOIN pg_catalog.pg_namespace pn ON pn.oid = pc.relnamespace
 WHERE i.indrelid = $1
 ORDER BY ic.relname`
 
@@ -105,7 +114,7 @@ func scanIndex(scan func(...any) error) (*Index, error) {
 	if err := scan(&x.OID, &x.Name, &x.Definition, &x.Method,
 		&x.Unique, &x.Primary, &x.Exclusion, &x.NullsNotDistinct, &x.Clustered, &x.Valid,
 		&x.KeyColumns, &x.IncludedColumns, &x.Predicate, &x.Constraint, &x.Tablespace,
-		&options, &x.Comment); err != nil {
+		&options, &x.Comment, &x.Parent.Schema, &x.Parent.Name); err != nil {
 		return nil, err
 	}
 	if len(x.IncludedColumns) == 0 {

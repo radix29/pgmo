@@ -49,10 +49,47 @@ until P16.2.
 
 ## Scripter fidelity
 
-To be measured against `pg_dump --schema-only` (`PLAN.md` P5.4). Gaps go
-here.
+To be measured against `pg_dump --schema-only` (`PLAN.md` P5.4); an ad-hoc
+diff of `TestLiveScripter`'s fixture showed none on pg15 and pg18. Known
+gaps of P5.1 (`ARCHITECTURE.md` § Scripter):
+
+- **Not restated, because not read:** a column's `SET STORAGE` against its
+  type's default, `attcompression`, per-column `attoptions`, replica
+  identity, the table access method, typed tables (`OF type`), an identity
+  column's sequence options (`START`, `INCREMENT` … in `GENERATED … AS
+  IDENTITY (…)`), rules, extended statistics, security labels, a database's
+  ACL (`datacl`), view column options.
+- **18's NOT NULL constraints** are written as the column's `NOT NULL`:
+  their names (when not the default `t_c_not_null`), `NO INHERIT` and `NOT
+  VALID` are lost. Likewise a domain's (17+).
+- **A partition** is `CREATE TABLE … PARTITION OF … FOR VALUES` with its own
+  constraints: a column default or NOT NULL of its own beyond its parent's
+  is lost (`pg_dump` creates it standalone and attaches it). An
+  inheritance child writes its local columns only.
+- **Grantors** other than the owner are not restated (`pg_dump` uses SET
+  SESSION AUTHORIZATION); nor is a membership's `GRANTED BY`.
+- **Database-wide default privileges** (`ALTER DEFAULT PRIVILEGES` without
+  `IN SCHEMA`) are in no single-object script: P5.3's whole-database
+  script, or a security script, writes them.
+- **Not DDL**: role passwords (a note), a user mapping's `password` option
+  (`PasswordPlaceholder`), a sequence's current value, extension
+  configuration tables' rows.
+- **`IfNotExists`** guards only the CREATEs PostgreSQL has the form for; no
+  `DO` block is written for the others (a view, a function, a type …).
+- **`SchemaQualify` off** writes the object's own name bare and renders
+  server text with its schema first on the path; names pgmo builds from
+  the catalog (a column's type, a foreign key's table, a cast's types)
+  stay qualified.
+- **One object per read**: each `Script…` reads its object's parts one
+  statement each; P5.3 wants them batched over many tables (§ Tables).
 
 ## Per-database pools: accepted limits
+
+- **`TestDatabasePoolsUnderConcurrency` (pgmotest) is flaky**: about one
+  run in five fails with "closed pool" reads and "2 databases open when the
+  readers finished (cap 2, soft)" — on `HEAD` before P5.1 as well (found
+  2026-11-28, 2 of 10 runs on a clean export). An eviction racing a lease,
+  in the fake or in `database_pools.go`; not investigated yet.
 
 - **The cap is soft** (`ARCHITECTURE.md` § Per-database pools): only idle
   entries are evicted, so a caller holding rows open in many databases keeps
@@ -166,9 +203,9 @@ rule (`pickOverload`); `Database.RoutineByName` exports the lookup. Still
 open: a caller naming an overload has argument type OIDs only; looking one
 up by type *names* needs those names resolved server-side (`to_regtype`) —
 qualified, or the session's `search_path` decides — a helper pgmo does not
-have yet (`…Ref` takes names, for writes, unresolved). The P5 scripter must
-write a zero-argument aggregate as `AGGREGATE s.ag(*)` (or use `ROUTINE`):
-`Signature()` gives `s.ag()`.
+have yet (`…Ref` takes names, for writes, unresolved). The scripter (P5.1)
+writes a zero-argument aggregate as `AGGREGATE s.ag(*)`
+(`aggregateSignature`): `Signature()` gives `s.ag()`.
 
 ## System objects: what P3.7 left for the families
 
@@ -186,8 +223,9 @@ extensions, casts, languages, tablespaces, FDWs) have no `IsSystem` by
 this rule — the family decides (an OID below `FirstNormalObjectId`, 16384,
 is the usual sign of a built-in one; event triggers use it, P4.9,
 extensions, P4.10, where it marks plpgsql, tablespaces, languages and
-casts, P4.11, wrappers and servers, P4.12, where it marks none). The P5
-scripter writes `CREATE EXTENSION` for a member, never the member's DDL.
+casts, P4.11, wrappers and servers, P4.12, where it marks none). The
+scripter (P5.1) writes a note for a member, never the member's DDL;
+`ScriptExtension` writes `CREATE EXTENSION`.
 
 ## Databases: what P4.1 left
 
@@ -276,10 +314,9 @@ scripter writes `CREATE EXTENSION` for a member, never the member's DDL.
   `Index.Definition`/`KeyColumns`/`Predicate`, `Trigger.Definition` and
   `Policy.Using`/`WithCheck` come from `pg_get_*`, which leave a name
   visible on the session's path unqualified (`ARCHITECTURE.md` § Tables).
-  Fine for display, as psql; the P5 scripter must render them under a fixed
-  path — `SET LOCAL search_path = pg_catalog, pg_temp` in a read-only
-  transaction, as `pg_dump` sets `search_path = ''` — so its DDL means the
-  same in any session.
+  Fine for display, as psql; the scripter (P5.1) reads them under fixed
+  settings (`renderIn`, `ARCHITECTURE.md` § Scripter), so its DDL means
+  the same in any session.
 - **One table at a time.** Each part is one statement per table; the P5
   scripter (and a Columns pane over a whole schema) wants each part for
   many tables in one statement, grouped in Go (`conrelid = ANY($1)`).
@@ -291,8 +328,7 @@ scripter writes `CREATE EXTENSION` for a member, never the member's DDL.
   / the owned-by link), `attcompression`, `attoptions` (per-column
   `n_distinct`), `confdelsetcols` (`ON DELETE SET
   NULL (cols)` — in `Definition`), `conperiod` (18, `WITHOUT OVERLAPS` /
-  `PERIOD` — in `Definition`), a partitioned index's parent
-  (`pg_inherits` over indexes), replica identity (`relreplident`, P14),
+  `PERIOD` — in `Definition`), replica identity (`relreplident`, P14),
   the table access method (`relam`), typed tables (`reloftype`),
   `relallfrozen` (18), rules (`pg_rewrite`, shown on their table, P8.2) and
   extended statistics (`pg_statistic_ext`, P8.2), security labels.
@@ -304,7 +340,7 @@ scripter writes `CREATE EXTENSION` for a member, never the member's DDL.
 
 - **`Definition` follows the caller's `search_path`**, as every rendered
   expression in § Tables: `pg_get_viewdef` writes `FROM t` for `app.t`
-  when `app` is on the path (pinned by `TestLiveViews`). The P5 scripter
+  when `app` is on the path (pinned by `TestLiveViews`). The scripter
   renders it under a fixed path, as § Tables says. It is the non-pretty
   form (`pg_dump`'s), with the leading space and closing semicolon the
   server gives; a properties pane may want `pg_get_viewdef(oid, true)` —
@@ -368,9 +404,8 @@ scripter writes `CREATE EXTENSION` for a member, never the member's DDL.
   parsing the statement; a properties pane shows the definition.
 - **`Definition` follows the session**: names by `search_path` (as every
   rendered expression, § Tables) and argument literals by
-  `standard_conforming_strings` (off doubles a backslash). The P5 scripter
-  renders under fixed settings, or builds the statement from the fields —
-  every clause but WHEN has one.
+  `standard_conforming_strings` (off doubles a backslash). The scripter
+  renders it under fixed settings (P5.1).
 - **Writes (P4.13.3)** leave the event trigger owner's superuser rule to
   the server (42501); pgMS can offer only superusers in its owner picker.
   Not written: `ALTER TRIGGER … DEPENDS ON EXTENSION`, a constraint
@@ -453,7 +488,7 @@ scripter writes `CREATE EXTENSION` for a member, never the member's DDL.
 
 - **Rendered text follows the caller's `search_path`**: `Result`,
   `IdentityArguments`, `RoutineArgument.Default` and `Body`'s definition
-  (pinned by `TestLiveRoutines`). The P5 scripter renders under a fixed
+  (pinned by `TestLiveRoutines`). The scripter renders under a fixed
   path, as § Tables.
 - **Not read:** `TRANSFORM FOR TYPE` (`protrftypes`), a C function's
   `AS 'obj', 'sym'` as fields beyond `ObjectFile` + `Body.Source`, a

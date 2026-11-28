@@ -3,6 +3,7 @@ package pgmo
 import (
 	"context"
 	"fmt"
+	"strings"
 )
 
 // ============================================================
@@ -65,6 +66,12 @@ type Cast struct {
 	// type modifier and a boolean "explicit" flag.
 	Function ObjectName
 
+	// FunctionArguments are the conversion function's argument types as
+	// DDL writes them, qualified outside pg_catalog whatever the session's
+	// search_path (as RoutineIdentity.ArgumentTypeNames); nil for none.
+	// FunctionSignature joins them to Function.
+	FunctionArguments []string
+
 	Context CastContext
 	Method  CastMethod
 
@@ -75,6 +82,15 @@ type Cast struct {
 // Database is the Database the cast was read from.
 func (c *Cast) Database() *Database { return c.db }
 
+// FunctionSignature is the conversion function as CREATE CAST … WITH
+// FUNCTION names it, "pg_catalog.int4(bigint)"; "" for a cast without one.
+func (c *Cast) FunctionSignature() string {
+	if c.Function.Name == "" {
+		return ""
+	}
+	return c.Function.QualifiedName() + "(" + strings.Join(c.FunctionArguments, ", ") + ")"
+}
+
 // Signature is the cast's identity as DROP CAST and COMMENT ON CAST take it:
 // "(integer AS app.mood)".
 func (c *Cast) Signature() string { return "(" + c.Source + " AS " + c.Target + ")" }
@@ -84,17 +100,30 @@ func (c *Cast) Signature() string { return "(" + c.Source + " AS " + c.Target + 
 var castSelect = `SELECT ca.oid, ca.oid < 16384, COALESCE(ext.extname::pg_catalog.text, ''),
 	ca.castsource, ` + typeName("st") + `,
 	ca.casttarget, ` + typeName("tt") + `,
-	` + procedureName("cf") + `,
+	` + procedureName("cf") + `, cfa.types,
 	ca.castcontext::pg_catalog.text, ca.castmethod::pg_catalog.text,
 	COALESCE(ds.description, '')
 FROM pg_catalog.pg_cast ca
 ` + typeJoins("JOIN", "ca.castsource", "st") + `
 ` + typeJoins("JOIN", "ca.casttarget", "tt") + `
 ` + procedureJoin("ca.castfunc", "cf") + `
+` + castFunctionArguments + `
 ` + originJoin(catalogCast, "ca.oid") + `
 LEFT JOIN pg_catalog.pg_description ds ON ds.objoid = ca.oid
 	AND ds.classoid = 'pg_catalog.pg_cast'::pg_catalog.regclass AND ds.objsubid = 0
 WHERE true`
+
+// castFunctionArguments is the LEFT JOIN reading every cast function's
+// argument type names as cfa.types, typeName's, in order: one grouped read
+// of the casts' functions, not a subquery per cast (see routineArguments).
+// A cast without a function, or one taking none, reads NULL.
+var castFunctionArguments = `LEFT JOIN (SELECT x.proc, pg_catalog.array_agg(` + typeName("xt") + ` ORDER BY x.n)
+	FROM (SELECT q.oid, u.oid, u.n
+		FROM pg_catalog.pg_proc q,
+		pg_catalog.unnest(q.proargtypes::pg_catalog.oid[]) WITH ORDINALITY AS u(oid, n)
+		WHERE q.oid IN (SELECT c.castfunc FROM pg_catalog.pg_cast c)) AS x(proc, type, n)
+	` + typeJoins("JOIN", "x.type", "xt") + `
+	GROUP BY x.proc) AS cfa(proc, types) ON cfa.proc = ca.castfunc`
 
 // scanCast builds a *Cast of d from one castSelect row.
 func scanCast(d *Database, scan func(...any) error) (*Cast, error) {
@@ -103,7 +132,7 @@ func scanCast(d *Database, scan func(...any) error) (*Cast, error) {
 	var context, method string
 	dest := []any{&c.OID}
 	dest = append(dest, scanOrigin(&c.Origin)...)
-	dest = append(dest, &c.SourceType, &c.Source, &c.TargetType, &c.Target, &function, &context, &method, &c.Comment)
+	dest = append(dest, &c.SourceType, &c.Source, &c.TargetType, &c.Target, &function, &c.FunctionArguments, &context, &method, &c.Comment)
 	if err := scan(dest...); err != nil {
 		return nil, err
 	}
