@@ -43,6 +43,7 @@ var sweptTypes = map[string]reflect.Type{
 
 	"Trigger":      reflect.TypeFor[*Trigger](),
 	"EventTrigger": reflect.TypeFor[*EventTrigger](),
+	"Policy":       reflect.TypeFor[*Policy](),
 
 	"Extension": reflect.TypeFor[*Extension](),
 
@@ -76,6 +77,7 @@ var sweepSkip = map[string]string{
 	"Role.Drop":                   "DROP ROLE",
 	"Role.ClearPassword":          "ALTER ROLE … PASSWORD NULL",
 	"Role.ResetAllParameters":     "ALTER ROLE … RESET ALL",
+	"Tablespace.Drop":             "DROP TABLESPACE",
 }
 
 // sweepNotReads names the exported context-first methods reflectSweep cannot
@@ -111,6 +113,130 @@ var sweepNotReads = map[string]string{
 	"Role.ResetAllDatabaseParameters": "ALTER ROLE … IN DATABASE … RESET ALL",
 	"Role.AddMember":                  "GRANT role TO member",
 	"Role.RemoveMember":               "REVOKE role FROM member",
+
+	// Objects owned (role_write.go, P4.14).
+	"Database.ReassignOwned": "REASSIGN OWNED BY … TO …",
+	"Database.DropOwned":     "DROP OWNED BY …",
+
+	// P4.13.3 (object_write.go and the *_write.go files): every CreateX's
+	// read-back is its family's XByName, swept on its own.
+	"Database.CreateCompositeType":     "CREATE TYPE … AS (…), read back by TypeByName",
+	"Database.CreateDomain":            "CREATE DOMAIN, read back by DomainByName",
+	"Database.CreateEnumType":          "CREATE TYPE … AS ENUM, read back by TypeByName",
+	"Database.CreateExtension":         "CREATE EXTENSION, read back by ExtensionByName",
+	"Database.CreateFunction":          "CREATE FUNCTION, read back by FunctionByName",
+	"Database.CreateMaterializedView":  "CREATE MATERIALIZED VIEW, read back by MaterializedViewByName",
+	"Database.CreateProcedure":         "CREATE PROCEDURE, read back by ProcedureByName",
+	"Database.CreateRangeType":         "CREATE TYPE … AS RANGE, read back by TypeByName",
+	"Database.CreateSchema":            "CREATE SCHEMA, read back by SchemaByName",
+	"Database.CreateSequence":          "CREATE SEQUENCE, read back by SequenceByName",
+	"Database.CreateTable":             "CREATE TABLE, read back by TableByName",
+	"Database.CreateTrigger":           "CREATE TRIGGER, read back by TriggerByName",
+	"Database.CreateView":              "CREATE VIEW, read back by ViewByName",
+	"Database.SetComment":              "COMMENT ON DATABASE",
+	"Domain.AddConstraint":             "ALTER DOMAIN … ADD",
+	"Domain.Drop":                      "DROP DOMAIN",
+	"Domain.DropConstraint":            "ALTER DOMAIN … DROP CONSTRAINT",
+	"Domain.Rename":                    "ALTER DOMAIN … RENAME TO",
+	"Domain.SetComment":                "COMMENT ON DOMAIN",
+	"Domain.SetDefault":                "ALTER DOMAIN … SET/DROP DEFAULT",
+	"Domain.SetNotNull":                "ALTER DOMAIN … SET/DROP NOT NULL",
+	"Domain.SetOwner":                  "ALTER DOMAIN … OWNER TO",
+	"Domain.SetSchema":                 "ALTER DOMAIN … SET SCHEMA",
+	"Domain.ValidateConstraint":        "ALTER DOMAIN … VALIDATE CONSTRAINT",
+	"Database.CreateEventTrigger":      "CREATE EVENT TRIGGER, read back by EventTriggerByName",
+	"EventTrigger.Drop":                "DROP EVENT TRIGGER",
+	"EventTrigger.Rename":              "ALTER EVENT TRIGGER … RENAME TO",
+	"EventTrigger.SetComment":          "COMMENT ON EVENT TRIGGER",
+	"EventTrigger.SetEnabled":          "ALTER EVENT TRIGGER … ENABLE/DISABLE",
+	"EventTrigger.SetOwner":            "ALTER EVENT TRIGGER … OWNER TO",
+	"Extension.Drop":                   "DROP EXTENSION",
+	"Extension.SetComment":             "COMMENT ON EXTENSION",
+	"Extension.SetSchema":              "ALTER EXTENSION … SET SCHEMA",
+	"Extension.Update":                 "ALTER EXTENSION … UPDATE",
+	"Function.Drop":                    "DROP FUNCTION",
+	"Function.Rename":                  "ALTER FUNCTION … RENAME TO",
+	"Function.SetComment":              "COMMENT ON FUNCTION",
+	"Function.SetOwner":                "ALTER FUNCTION … OWNER TO",
+	"Function.SetSchema":               "ALTER FUNCTION … SET SCHEMA",
+	"MaterializedView.CreateIndex":     "CREATE INDEX",
+	"MaterializedView.Drop":            "DROP MATERIALIZED VIEW",
+	"MaterializedView.DropIndex":       "DROP INDEX",
+	"MaterializedView.Refresh":         "REFRESH MATERIALIZED VIEW",
+	"MaterializedView.Rename":          "ALTER MATERIALIZED VIEW … RENAME TO",
+	"MaterializedView.RenameIndex":     "ALTER INDEX … RENAME TO",
+	"MaterializedView.SetComment":      "COMMENT ON MATERIALIZED VIEW",
+	"MaterializedView.SetIndexComment": "COMMENT ON INDEX",
+	"MaterializedView.SetOwner":        "ALTER MATERIALIZED VIEW … OWNER TO",
+	"MaterializedView.SetSchema":       "ALTER MATERIALIZED VIEW … SET SCHEMA",
+	"Procedure.Drop":                   "DROP PROCEDURE",
+	"Procedure.Rename":                 "ALTER PROCEDURE … RENAME TO",
+	"Procedure.SetComment":             "COMMENT ON PROCEDURE",
+	"Procedure.SetOwner":               "ALTER PROCEDURE … OWNER TO",
+	"Procedure.SetSchema":              "ALTER PROCEDURE … SET SCHEMA",
+	"Role.SetComment":                  "COMMENT ON ROLE",
+	"Schema.Drop":                      "DROP SCHEMA",
+	"Schema.Rename":                    "ALTER SCHEMA … RENAME TO",
+	"Schema.SetComment":                "COMMENT ON SCHEMA",
+	"Schema.SetOwner":                  "ALTER SCHEMA … OWNER TO",
+	"Sequence.Alter":                   "ALTER SEQUENCE",
+	"Sequence.Drop":                    "DROP SEQUENCE",
+	"Sequence.Rename":                  "ALTER SEQUENCE … RENAME TO",
+	"Sequence.SetComment":              "COMMENT ON SEQUENCE",
+	"Sequence.SetOwner":                "ALTER SEQUENCE … OWNER TO",
+	"Sequence.SetSchema":               "ALTER SEQUENCE … SET SCHEMA",
+	"Server.CreateTablespace":          "CREATE TABLESPACE, read back by TablespaceByName",
+	"Table.AddColumn":                  "ALTER TABLE … ADD COLUMN",
+	"Table.AddConstraint":              "ALTER TABLE … ADD",
+	"Table.AlterColumn":                "ALTER TABLE … ALTER COLUMN",
+	"Table.CreateIndex":                "CREATE INDEX",
+	"Table.Drop":                       "DROP TABLE",
+	"Table.DropColumn":                 "ALTER TABLE … DROP COLUMN",
+	"Table.DropConstraint":             "ALTER TABLE … DROP CONSTRAINT",
+	"Table.DropIndex":                  "DROP INDEX",
+	"Table.Rename":                     "ALTER TABLE … RENAME TO",
+	"Table.RenameColumn":               "ALTER TABLE … RENAME COLUMN",
+	"Table.RenameConstraint":           "ALTER TABLE … RENAME CONSTRAINT",
+	"Table.RenameIndex":                "ALTER INDEX … RENAME TO",
+	"Table.SetColumnComment":           "COMMENT ON COLUMN",
+	"Table.SetComment":                 "COMMENT ON TABLE",
+	"Table.SetConstraintComment":       "COMMENT ON CONSTRAINT",
+	"Table.SetIndexComment":            "COMMENT ON INDEX",
+	"Table.SetOwner":                   "ALTER TABLE … OWNER TO",
+	"Table.SetSchema":                  "ALTER TABLE … SET SCHEMA",
+	"Tablespace.Rename":                "ALTER TABLESPACE … RENAME TO",
+	"Tablespace.ResetOptions":          "ALTER TABLESPACE … RESET (…)",
+	"Tablespace.SetComment":            "COMMENT ON TABLESPACE",
+	"Tablespace.SetOptions":            "ALTER TABLESPACE … SET (…)",
+	"Tablespace.SetOwner":              "ALTER TABLESPACE … OWNER TO",
+	"Table.ValidateConstraint":         "ALTER TABLE … VALIDATE CONSTRAINT",
+	"Trigger.Drop":                     "DROP TRIGGER",
+	// P4.13.4 (privilege_write.go, policy_write.go): CreatePolicy's
+	// read-back is PolicyByName, swept on its own.
+	"Database.ApplyPrivileges":        "GRANT/REVOKE … ON an object in the database",
+	"Server.ApplyPrivileges":          "GRANT/REVOKE … ON DATABASE/TABLESPACE/PARAMETER",
+	"Database.AlterDefaultPrivileges": "ALTER DEFAULT PRIVILEGES",
+	"Database.CreatePolicy":           "CREATE POLICY, read back by PolicyByName",
+	"Table.SetRowSecurity":            "ALTER TABLE … ENABLE/DISABLE ROW LEVEL SECURITY",
+	"Table.SetForceRowSecurity":       "ALTER TABLE … [NO] FORCE ROW LEVEL SECURITY",
+	"Policy.Alter":                    "ALTER POLICY … ON",
+	"Policy.Rename":                   "ALTER POLICY … ON … RENAME TO",
+	"Policy.SetComment":               "COMMENT ON POLICY",
+	"Trigger.Rename":                  "ALTER TRIGGER … RENAME TO",
+	"Trigger.SetComment":              "COMMENT ON TRIGGER",
+	"Trigger.SetEnabled":              "ALTER TABLE … ENABLE/DISABLE TRIGGER",
+	"Type.AddEnumValue":               "ALTER TYPE … ADD VALUE",
+	"Type.Drop":                       "DROP TYPE",
+	"Type.Rename":                     "ALTER TYPE … RENAME TO",
+	"Type.RenameEnumValue":            "ALTER TYPE … RENAME VALUE",
+	"Type.SetComment":                 "COMMENT ON TYPE",
+	"Type.SetOwner":                   "ALTER TYPE … OWNER TO",
+	"Type.SetSchema":                  "ALTER TYPE … SET SCHEMA",
+	"View.Drop":                       "DROP VIEW",
+	"View.Rename":                     "ALTER VIEW … RENAME TO",
+	"View.SetComment":                 "COMMENT ON VIEW",
+	"View.SetOwner":                   "ALTER VIEW … OWNER TO",
+	"View.SetSchema":                  "ALTER VIEW … SET SCHEMA",
 }
 
 // sweepReaders maps every function that sends a read — calls one of
@@ -140,6 +266,7 @@ var sweepReaders = map[string]string{
 	"Table.Indexes":              "Table.Indexes",
 	"relationTriggers":           "Table.Triggers",
 	"Table.Policies":             "Table.Policies",
+	"Database.PolicyByName":      "Database.PolicyByName",
 	"Table.Children":             "Table.Children",
 	"Table.Size":                 "Table.Size",
 
@@ -207,6 +334,13 @@ var sweepReaders = map[string]string{
 	"listRoutines":        "Database.Functions",
 	"routineFamilyByName": "Database.FunctionByName",
 	"readBody":            "Function.Body",
+
+	// Dependencies and search (P4.14): the four dependency reads share one
+	// reader, driven through each (sweepMustCall lists all four).
+	"readDependencies":           "Database.Dependencies",
+	"Server.DependentDatabases":  "Server.DependentDatabases",
+	"Database.Search":            "Database.Search",
+	"Database.SearchDefinitions": "Database.SearchDefinitions",
 }
 
 // sweepMustCall names every read the live sweep must reach, by hand or
@@ -258,6 +392,7 @@ var sweepMustCall = []string{
 	"Table.Indexes",
 	"Table.Triggers",
 	"Table.Policies",
+	"Database.PolicyByName",
 	"Table.Children",
 	"Table.Size",
 
@@ -376,6 +511,18 @@ var sweepMustCall = []string{
 	// over every catalog it is written for.
 	"originColumns",
 	"ObjectFilter.clause",
+
+	// Dependencies and search (P4.14), by hand on the fixture: each
+	// direction inside the database and between shared objects, the
+	// databases a role has dependents in, a search by name and by
+	// definition.
+	"Database.Dependencies",
+	"Database.Dependents",
+	"Server.Dependencies",
+	"Server.Dependents",
+	"Server.DependentDatabases",
+	"Database.Search",
+	"Database.SearchDefinitions",
 }
 
 // readHelpers are the read paths of statement.go and rows.go: every read

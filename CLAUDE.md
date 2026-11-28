@@ -82,7 +82,30 @@ Module `github.com/radix29/pgmo`, MIT.
   `script_*_write_test.go`; the role writes `CreateRole`, `Role.Drop`,
   `Rename`, `Alter` (`RoleAttributes`), `SetPassword`, `ClearPassword`,
   the role and role-in-database `SetParameter`/`Reset…` forms,
-  `AddMember`/`RemoveMember` in `role_write.go`).
+  `AddMember`/`RemoveMember` in `role_write.go`; P4.13.3's object writes —
+  the shared `DropOptions`, `ddlObject` and drop/rename/move/owner/comment
+  forms in `object_write.go`, `CreateSchema` and the schema writes in
+  `schema_write.go`, `CreateTable` (`ColumnSpec`, `ConstraintSpec`) and the
+  column and constraint writes in `table_write.go`, `CreateIndex`/
+  `DropIndex`/`RenameIndex`/`SetIndexComment` on tables and materialized
+  views in `index_write.go`, `CreateView`, `CreateMaterializedView`,
+  `Refresh` in `view_write.go`, `CreateFunction`/`CreateProcedure` in
+  `routine_write.go`, `CreateSequence`/`Sequence.Alter` in
+  `sequence_write.go`, the enum/composite/range types and domains in
+  `type_write.go`, `CreateTrigger`/`SetEnabled` in `trigger_write.go`,
+  `CreateEventTrigger` in `event_trigger_write.go`, `CreateExtension`/
+  `Update` in `extension_write.go`, `CreateTablespace` and its alters in
+  `tablespace_write.go`, `Database.SetComment`, `Role.SetComment`;
+  `pgsql.QuoteDollar`; P4.13.4's privilege writes — `ApplyPrivileges` on
+  `Database` and `Server` (`Securable`, `PrivilegeChange`, every handle's
+  `Securable()`) and `AlterDefaultPrivileges` in `privilege_write.go`;
+  `SetRowSecurity`, `SetForceRowSecurity`, `CreatePolicy` and the policy
+  writes in `policy_write.go`, `PolicyByName`/`PolicyRef` in `policy.go`;
+  P4.14 — `ObjectAddress`, `Dependency`, `Database.Dependencies`/
+  `Dependents` and `Server.Dependencies`/`Dependents`/`DependentDatabases`
+  in `dependency.go`, every handle's `Address()` in `object_address.go`,
+  `Database.Search`/`SearchDefinitions` in `search.go`,
+  `Database.ReassignOwned`/`DropOwned` in `role_write.go`).
   The plan for pgmo *and* pgMS is
   `~/go/pgms/docs/PLAN.md` (`docs/PLAN.md` here points to it); pgmo owns
   phases P1–P6 and shares P14–P16.

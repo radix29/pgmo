@@ -162,3 +162,33 @@ func TestScriptRoleMembershipOn15(t *testing.T) {
 		}, `REVOKE ADMIN OPTION FOR "My ""Role""" FROM m GRANTED BY "user" CASCADE`},
 	})
 }
+
+// REASSIGN OWNED and DROP OWNED, whole, with quote-hostile role names,
+// captured as run in the database they act in; the refusals send nothing.
+func TestScriptOwnedWrites(t *testing.T) {
+	f := pgmotest.New(t)
+	d := f.Server().DatabaseRef(hostileDB)
+	runScriptCasesIn(t, f, hostileDB, []scriptCase{
+		{"reassign, one role", func(ctx context.Context) error {
+			return d.ReassignOwned(ctx, []string{`My "Role"`}, "o'brien")
+		}, `REASSIGN OWNED BY "My ""Role""" TO "o'brien"`},
+		{"reassign, several roles", func(ctx context.Context) error {
+			return d.ReassignOwned(ctx, []string{"a", `B\c`, "user"}, "New Owner")
+		}, `REASSIGN OWNED BY a, "B\c", "user" TO "New Owner"`},
+		{"drop, restrict", func(ctx context.Context) error {
+			return d.DropOwned(ctx, []string{`My "Role"`, "b"}, pgmo.DropOptions{})
+		}, `DROP OWNED BY "My ""Role""", b`},
+		{"drop, cascade", func(ctx context.Context) error {
+			return d.DropOwned(ctx, []string{"a"}, pgmo.DropOptions{Cascade: true})
+		}, `DROP OWNED BY a CASCADE`},
+	})
+
+	inv := pgmo.ErrInvalidRequest
+	runRefusals(t, f, []refusalCase{
+		{"reassign, no role", func(ctx context.Context) error { return d.ReassignOwned(ctx, nil, "o") }, inv},
+		{"reassign, an empty role", func(ctx context.Context) error { return d.ReassignOwned(ctx, []string{"a", ""}, "o") }, inv},
+		{"reassign, no new owner", func(ctx context.Context) error { return d.ReassignOwned(ctx, []string{"a"}, "") }, inv},
+		{"drop, no role", func(ctx context.Context) error { return d.DropOwned(ctx, []string{}, pgmo.DropOptions{}) }, inv},
+		{"drop, an empty role", func(ctx context.Context) error { return d.DropOwned(ctx, []string{""}, pgmo.DropOptions{}) }, inv},
+	})
+}

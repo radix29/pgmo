@@ -150,3 +150,21 @@ func QuoteLiteral(s string) string {
 	sb.WriteByte('\'')
 	return sb.String()
 }
+
+// QuoteDollar quotes s as a dollar-quoted string constant, the form pg_dump
+// writes a function body in: $$…$$, or $_$…$_$, $__$…$__$ — the first tag
+// whose opening part ("$", "$_", …) does not occur in s, as pg_dump's
+// appendStringLiteralDQ picks it. Nothing inside is escaped, so a body reads
+// exactly as written, quotes and backslashes included, whatever
+// standard_conforming_strings says.
+//
+// No occurrence of the closing tag can start inside s: one would need s to
+// end in the tag's opening part, which s does not contain.
+func QuoteDollar(s string) string {
+	tag := "$"
+	for strings.Contains(s, tag) {
+		tag += "_"
+	}
+	tag += "$"
+	return tag + s + tag
+}

@@ -18,6 +18,7 @@ func FuzzNames(f *testing.F) {
 		"", "public", "Orders", `a"b`, `"a""b"`, `"s"."t"`, `"a"b"`, "select", "name", "json_table",
 		"_x$1", "1x", "é", "ſ", "\xff", "a\x00b", `it's`, `a\b`, `\'`, `\`, "''", "$$", "$1",
 		"*/", "/*", "*/*", "a\nb", "a\rb", "-- x", "/* x */", "U&\"x\"", "E'x'",
+		"$", "x$", "$_", "a$_", "$_$", "$$_$$", "$tag$",
 	} {
 		f.Add(s)
 	}
@@ -53,6 +54,7 @@ func FuzzNames(f *testing.F) {
 			kind = SpanEscapeLiteral
 		}
 		only(t, lit, kind, s)
+		only(t, QuoteDollar(s), SpanDollarLiteral, s)
 
 		if got := CommentSafe(s); strings.ContainsAny(got, "\r\n") {
 			t.Fatalf("CommentSafe(%q) = %q keeps a line break", s, got)

@@ -36,7 +36,7 @@ var (
 		pgtype.BoolOID, pgtype.BoolOID, pgtype.BoolOID, pgtype.BoolOID, pgtype.BoolOID, pgtype.BoolOID,
 		pgtype.TextArrayOID, pgtype.TextArrayOID, pgtype.TextOID, pgtype.TextOID, pgtype.TextOID,
 		pgtype.TextArrayOID, pgtype.TextOID}
-	policyTypes = []uint32{pgtype.OIDOID, pgtype.TextOID, pgtype.TextOID, pgtype.BoolOID, pgtype.TextArrayOID,
+	policyTypes = []uint32{pgtype.OIDOID, pgtype.TextOID, pgtype.TextOID, pgtype.TextOID, pgtype.TextOID, pgtype.BoolOID, pgtype.TextArrayOID,
 		pgtype.TextOID, pgtype.TextOID, pgtype.TextOID}
 	childTypes = []uint32{pgtype.OIDOID, pgtype.TextOID, pgtype.TextOID, pgtype.TextOID, pgtype.TextOID, pgtype.BoolOID}
 	sizeTypes  = []uint32{pgtype.Int8OID, pgtype.Int8OID, pgtype.Int8OID}
@@ -415,15 +415,20 @@ func TestTableIndexes(t *testing.T) {
 func TestTablePolicies(t *testing.T) {
 	_, other, tb := loadedTable(t, map[string]pgmotest.Responder{
 		"FROM pg_catalog.pg_policy po": rowsOf(policyTypes,
-			[]any{uint32(70001), "p1", "w", false, []string{"B b", ""}, "(a > 0)", "(b > 0)", "pol"}),
+			[]any{uint32(70001), "app", "kid", "p1", "w", false, []string{"B b", ""}, "(a > 0)", "(b > 0)", "pol"}),
 	})
 	ps, err := tb.Policies(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := pgmo.Policy{OID: 70001, Name: "p1", Command: pgmo.PolicyUpdate, Roles: []string{"B b", ""},
+	want := pgmo.Policy{OID: 70001, Schema: "app", Table: "kid", Name: "p1", Command: pgmo.PolicyUpdate, Roles: []string{"B b", ""},
 		Using: "(a > 0)", WithCheck: "(b > 0)", Comment: "pol"}
-	if len(ps) != 1 || !reflect.DeepEqual(*ps[0], want) {
+	if len(ps) != 1 || ps[0].Database() != tb.Database() {
+		t.Fatalf("Policies = %+v: want one policy of the table's database", ps)
+	}
+	got := *ps[0]
+	got.SetDatabase(nil)
+	if !reflect.DeepEqual(got, want) {
 		t.Errorf("Policies = %+v, want %+v", ps, want)
 	}
 	if !strings.Contains(lastQuery(other).Text, "CASE WHEN r.oid = 0 THEN ''") {

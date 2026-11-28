@@ -502,3 +502,18 @@ func splitGUCList(s string) (elems []string, ok bool) {
 		}
 	}
 }
+
+// SetComment sets the database's comment (COMMENT ON DATABASE), "" removing
+// it, mirrored onto Comment (not under WithScript). A database's comment is
+// cluster-wide (pg_shdescription), so it is written from the Server's own
+// session, whichever database that is.
+func (d *Database) SetComment(ctx context.Context, text string) error {
+	if d.Name == "" {
+		return invalidf("pgmo: comment on database: no name")
+	}
+	if _, err := d.server.exec(ctx, commentStatement("DATABASE "+pgsql.QuoteIdent(d.Name), text)); err != nil {
+		return fmt.Errorf("pgmo: comment on database %q: %w", d.Name, err)
+	}
+	setIfApplied(ctx, &d.Comment, text)
+	return nil
+}

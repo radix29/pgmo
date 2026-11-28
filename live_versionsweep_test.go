@@ -354,6 +354,7 @@ func TestLiveVersionSweep(t *testing.T) {
 			sweepRoutineFamilies(sw, db)
 			sweepRoutines(sw)
 			sweepFragments(sw)
+			sweepDependencies(sw, db, plainRole)
 			sw.checkCoverage()
 
 			slices.Sort(sw.failed)
@@ -688,6 +689,13 @@ func sweepTables(sw *sweep, db *Database) {
 		ps, err := t.Policies(ctx)
 		if err == nil && (len(ps) != 1 || ps[0].Name != "child_all" || ps[0].Using != "true" || !t.RowSecurity) {
 			err = fmt.Errorf("%d policies, RowSecurity %v: want child_all USING (true), enabled", len(ps), t.RowSecurity)
+		}
+		return err
+	})
+	sw.call("Database.PolicyByName(app.child.child_all)", func(ctx context.Context) error {
+		p, err := db.PolicyByName(ctx, "app", "child", "child_all")
+		if err == nil && (p.Using != "true" || p.Table != "child" || p.Schema != "app" || p.Command != PolicyAll) {
+			err = fmt.Errorf("policy %+v: want app.child's child_all, FOR ALL USING (true)", p)
 		}
 		return err
 	})
@@ -1749,6 +1757,91 @@ func sweepFragments(sw *sweep) {
 			WHERE c.relkind::pg_catalog.text = $1`+where+` ORDER BY 1`, args...)
 		if err == nil && !slices.Equal(names, []string{"parent"}) {
 			err = fmt.Errorf("matched %q, want [parent]", names)
+		}
+		return err
+	})
+}
+
+// sweepDependencies drives the P4.14 reads with an assertion on their rows:
+// each dependency direction on the fixture's view and table, the shared
+// edges of the scratch database and of the plain role, the databases the
+// plain role has dependents in, and both searches.
+func sweepDependencies(sw *sweep, db *Database, plain *Role) {
+	has := func(deps []Dependency, typ, identity string, kind DependencyKind, part string) bool {
+		return slices.ContainsFunc(deps, func(d Dependency) bool {
+			return d.Type == typ && d.Identity == identity && d.Kind == kind && d.Part == part && d.OID != 0 && d.Catalog != ""
+		})
+	}
+	sw.call("Database.Dependencies(app.parent_names)", func(ctx context.Context) error {
+		v, err := db.ViewByName(ctx, "app", "parent_names")
+		if err != nil {
+			return err
+		}
+		deps, err := v.Database().Dependencies(ctx, v.Address())
+		if err != nil {
+			return err
+		}
+		if !has(deps, "table", "app.parent", DependencyNormal, "app.parent.name") || !has(deps, "schema", "app", DependencyNormal, "") ||
+			!has(deps, "type", "app.citext", DependencyNormal, "") {
+			return fmt.Errorf("%+v: want app.parent through its columns, app and app.citext", deps)
+		}
+		return nil
+	})
+	sw.call("Database.Dependents(app.parent)", func(ctx context.Context) error {
+		t, err := db.TableByName(ctx, "app", "parent")
+		if err != nil {
+			return err
+		}
+		deps, err := db.Dependents(ctx, t.Address())
+		if err != nil {
+			return err
+		}
+		if !has(deps, "view", "app.parent_names", DependencyNormal, `"_RETURN" on app.parent_names`) ||
+			!has(deps, "materialized view", "app.parent_totals", DependencyNormal, `"_RETURN" on app.parent_totals`) ||
+			!has(deps, "table", "app.child", DependencyNormal, "child_parent_id_fkey on app.child") {
+			return fmt.Errorf("%+v: want the view, the materialized view and app.child's foreign key", deps)
+		}
+		return nil
+	})
+	sw.call("Server.Dependencies(scratch database)", func(ctx context.Context) error {
+		deps, err := sw.srv.Dependencies(ctx, db.Address())
+		for _, d := range deps {
+			if !d.Shared || d.Catalog != "pg_authid" {
+				return fmt.Errorf("%+v: a database depends on roles alone", d)
+			}
+		}
+		return err
+	})
+	sw.call("Server.Dependents(plain role)", func(ctx context.Context) error {
+		deps, err := sw.srv.Dependents(ctx, plain.Address())
+		if err == nil && len(deps) != 0 {
+			err = fmt.Errorf("%+v: the plain role owns no shared object", deps)
+		}
+		return err
+	})
+	sw.call("Server.DependentDatabases(plain role)", func(ctx context.Context) error {
+		_, err := sw.srv.DependentDatabases(ctx, plain.Address())
+		return err
+	})
+	sw.call("Database.Search(parent)", func(ctx context.Context) error {
+		rs, err := db.Search(ctx, ObjectFilter{Name: []TextCriterion{{TextContains, "PARENT"}}, Schema: []TextCriterion{{TextEquals, "app"}}})
+		if err != nil {
+			return err
+		}
+		var got []string
+		for _, r := range rs {
+			got = append(got, r.Type+" "+r.Identity)
+		}
+		want := []string{"materialized view app.parent_totals", "table app.parent", "view app.parent_names"}
+		if !slices.Equal(got, want) {
+			return fmt.Errorf("found %q, want %q", got, want)
+		}
+		return nil
+	})
+	sw.call("Database.SearchDefinitions(app.parent)", func(ctx context.Context) error {
+		rs, err := db.SearchDefinitions(ctx, "count(*)", ObjectFilter{Schema: []TextCriterion{{TextEquals, "app"}}})
+		if err == nil && (len(rs) != 1 || rs[0].Identity != "app.parent_totals") {
+			err = fmt.Errorf("%+v: want app.parent_totals alone", rs)
 		}
 		return err
 	})

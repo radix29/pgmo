@@ -92,6 +92,10 @@ func (dm *Domain) SetDatabase(d *Database) { dm.db = d }
 // catalog fields of two Triggers with reflect.DeepEqual.
 func (t *Trigger) SetDatabase(d *Database) { t.db = d }
 
+// SetDatabase replaces the Policy's back-pointer, so a test can compare the
+// catalog fields of two Policies with reflect.DeepEqual.
+func (p *Policy) SetDatabase(d *Database) { p.db = d }
+
 // SetDatabase replaces the EventTrigger's back-pointer, so a test can compare
 // the catalog fields of two EventTriggers with reflect.DeepEqual.
 func (e *EventTrigger) SetDatabase(d *Database) { e.db = d }

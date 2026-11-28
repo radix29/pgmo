@@ -37,9 +37,16 @@ type scriptCase struct {
 // Server's own database: every write here runs there.
 func runScriptCases(t *testing.T, f *pgmotest.Fake, cases []scriptCase) {
 	t.Helper()
+	runScriptCasesIn(t, f, pgmotest.DefaultDatabase, cases)
+}
+
+// runScriptCasesIn is runScriptCases for writes to objects inside database:
+// each must be captured as run there, on that database's own session.
+func runScriptCasesIn(t *testing.T, f *pgmotest.Fake, database string, cases []scriptCase) {
+	t.Helper()
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			before := len(f.Queries())
+			before, beforeIn := len(f.Queries()), len(f.Database(database).Queries())
 			ctx, script := pgmo.WithScript(t.Context())
 			if err := c.call(ctx); err != nil {
 				t.Fatalf("under WithScript: %v", err)
@@ -51,11 +58,14 @@ func runScriptCases(t *testing.T, f *pgmotest.Fake, cases []scriptCase) {
 			if got[0].SQL != c.want {
 				t.Errorf("statement mismatch\n got: %s\nwant: %s", got[0].SQL, c.want)
 			}
-			if got[0].Database != pgmotest.DefaultDatabase {
-				t.Errorf("captured as run in %q, want the Server's own %q", got[0].Database, pgmotest.DefaultDatabase)
+			if got[0].Database != database {
+				t.Errorf("captured as run in %q, want %q", got[0].Database, database)
 			}
 			if q := f.Queries()[before:]; len(q) != 0 {
 				t.Errorf("sent under WithScript: %v", q)
+			}
+			if q := f.Database(database).Queries()[beforeIn:]; len(q) != 0 {
+				t.Errorf("sent to %q under WithScript: %v", database, q)
 			}
 		})
 	}

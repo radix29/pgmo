@@ -376,11 +376,14 @@ func TestLiveTables(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, x := range pols {
-		x.OID = 0
+		if x.Database() != child.Database() {
+			t.Errorf("policy %s: database %v, want the table's", x.Name, x.Database())
+		}
+		x.OID, x.db = 0, nil
 	}
 	wantPols := []Policy{
-		{Name: "p1", Command: PolicyUpdate, Roles: []string{b, plain}, Using: "(a > 0)", WithCheck: "(b > 0)"},
-		{Name: "p2", Command: PolicyAll, Permissive: true, Roles: []string{""}, Using: "true", Comment: "all"},
+		{Schema: child.Schema, Table: child.Name, Name: "p1", Command: PolicyUpdate, Roles: []string{b, plain}, Using: "(a > 0)", WithCheck: "(b > 0)"},
+		{Schema: child.Schema, Table: child.Name, Name: "p2", Command: PolicyAll, Permissive: true, Roles: []string{""}, Using: "true", Comment: "all"},
 	}
 	if len(pols) != 2 || !reflect.DeepEqual(*pols[0], wantPols[0]) || !reflect.DeepEqual(*pols[1], wantPols[1]) {
 		t.Errorf("Policies(child) = %+v, want %+v", pols, wantPols)

@@ -110,6 +110,10 @@ that needs it, and is added to `pgmotest` in the same change:
 
 ## Flaky: `TestDatabasePoolsUnderConcurrency` under `-race`
 
+Also seen without `-race` on 2026-11-28 (1 of 10 runs of `go test -count=10
+./pgmotest`, `b: closed pool`), on a tree that touches neither pgmotest nor
+the pools.
+
 Seen 2026-11-21 while landing P2.2.6, present before it (2 of 15 runs on
 the P2.2.5 tree, 3 of 15 with P2.2.6): under `go test -race`, some readers
 of database `e` get `closed pool` and the test ends with 2 databases open.
@@ -197,10 +201,9 @@ scripter writes `CREATE EXTENSION` for a member, never the member's DDL.
   list-quoted parameter is not known (the flag is not in SQL) and reads as
   one value. Watch a release adding a `GUC_LIST_QUOTE` parameter
   (pg_dump's `variable_is_guc_list_quote`).
-- **Not written by P4.13.1:** `COMMENT ON DATABASE` (P4.13.3's comment
-  writes), `ALTER DATABASE … REFRESH COLLATION VERSION`, `ALTER DATABASE …
+- **Not written by P4.13.1:** `ALTER DATABASE … REFRESH COLLATION VERSION`, `ALTER DATABASE …
   SET … FROM CURRENT`, `ALTER ROLE … IN DATABASE … SET` (the role's,
-  P4.13.2), `GRANT … ON DATABASE` (P4.13.4), `DROP DATABASE IF EXISTS`
+  P4.13.2), `DROP DATABASE IF EXISTS`
   (a missing database is the server's 3D000).
 - **`releaseDatabase` closes only an idle pool.** Another goroutine reading
   the database between the release and the `DROP`/`RENAME` reopens one, and
@@ -214,8 +217,8 @@ scripter writes `CREATE EXTENSION` for a member, never the member's DDL.
   END`). Add it when pgMS's Databases folder needs it (P8).
 - **Not read yet:** `pg_database_collation_actual_version(oid)` (the
   version mismatch `ALTER DATABASE … REFRESH COLLATION VERSION` fixes),
-  `age(datfrozenxid)` (wraparound, P6/P14), `datacl` (privileges,
-  P4.13.4/P8), `dathasloginevt` (17+; a flag the server keeps so a login can skip
+  `age(datfrozenxid)` (wraparound, P6/P14), `datacl` (privileges, P8 — written
+  by `Server.ApplyPrivileges` since P4.13.4, read back by hand in its test), `dathasloginevt` (17+; a flag the server keeps so a login can skip
   the event trigger lookup — `Database.EventTriggers` filtered on
   `EventTriggerLogin` is the answer, so it stays unread).
 - **`diagram/`** is still empty: no family through P4.1 has its class
@@ -230,7 +233,7 @@ scripter writes `CREATE EXTENSION` for a member, never the member's DDL.
 - **Direct grants only.** `MemberOf`/`Members` are `pg_auth_members` rows;
   the transitive closure (what a role holds through nesting, and with which
   INHERIT/SET path) is `pg_has_role` per pair or a recursive query — add it
-  with effective permissions (P4.13.4/P5).
+  with effective permissions (P5; § Privilege writes).
 - **`ALTER ROLE ALL SET`** (`pg_db_role_setting` with both `setrole` and
   `setdatabase` 0) is neither a role's nor a database's setting and is not
   read; neither is `ALTER ROLE ALL IN DATABASE`, which is
@@ -238,14 +241,13 @@ scripter writes `CREATE EXTENSION` for a member, never the member's DDL.
 - **`RoleMembership.Inherit`/`Set` on 15 are what 15 checks**, not stored
   options; the P4.13.2 writes refuse `INHERIT`/`SET` (and `ADMIN FALSE`)
   before 16 with `ErrUnsupportedVersion`.
-- **Not read yet:** objects owned (`pg_shdepend`, needed before a drop —
-  `REASSIGN OWNED`/`DROP OWNED`, P4.14), `rolpassword` method, security
-  labels.
-- **Not written yet (P4.13.2):** `REASSIGN OWNED BY … TO …` and `DROP OWNED
-  BY …` — per database, through `execIn`; add them with P4.14's owned-object
-  read, which a Delete dialog (P8.7) needs to show what they would touch.
-  `COMMENT ON ROLE` is P4.13.3's comment write. `ALTER ROLE ALL [IN
-  DATABASE] SET` is not written, as it is not read. `SET … FROM CURRENT`
+- **Objects owned** are read since P4.14: `Database.Dependents` on the
+  role's `Address()` per database, `Server.DependentDatabases` naming the
+  databases, `Server.Dependents` the shared objects.
+- **Not read yet:** `rolpassword` method, security labels.
+- **`REASSIGN OWNED`/`DROP OWNED` landed with P4.14** (`Database.ReassignOwned`,
+  `Database.DropOwned`; § Dependencies and search).
+- **Not written:** `ALTER ROLE ALL [IN DATABASE] SET`, as it is not read. `SET … FROM CURRENT`
   is not offered (the session's value, not the caller's).
 - **Memberships are not mirrored** by `AddMember`/`RemoveMember`: the
   server records the grantor (from 16 a superuser's grant as the bootstrap
@@ -258,7 +260,8 @@ scripter writes `CREATE EXTENSION` for a member, never the member's DDL.
 
 - **No effective privileges.** `Privileges` is the ACL as stored (plus the
   hard-wired default); what a role can actually do through membership is
-  `has_schema_privilege` — with effective permissions (P4.13.4/P5).
+  `has_schema_privilege` — with effective permissions (P5; § Privilege
+  writes).
 - **Database-wide default privileges are on the Database only.** A Schema
   carries its IN SCHEMA entries; combining them with the database-wide ones
   (and the hard-wired default) into "what a new table here will get" is
@@ -295,7 +298,7 @@ scripter writes `CREATE EXTENSION` for a member, never the member's DDL.
   extended statistics (`pg_statistic_ext`, P8.2), security labels.
 - **Effective privileges** on a table or column (`has_table_privilege`,
   `has_column_privilege`) are left with the other families' to
-  P4.13.4/P5, as § Schemas says.
+  P5, as § Schemas says.
 
 ## Views: what P4.5 left
 
@@ -368,10 +371,10 @@ scripter writes `CREATE EXTENSION` for a member, never the member's DDL.
   `standard_conforming_strings` (off doubles a backslash). The P5 scripter
   renders under fixed settings, or builds the statement from the fields —
   every clause but WHEN has one.
-- **No `XChanges`/writes yet**: `ALTER TABLE … ENABLE/DISABLE TRIGGER`,
-  `ALTER TRIGGER … RENAME`, `DROP TRIGGER … ON`, `ALTER EVENT TRIGGER
-  … ENABLE/DISABLE/OWNER/RENAME` and both CREATEs are P4.13.3. An event
-  trigger's owner must be a superuser — a write to refuse early.
+- **Writes (P4.13.3)** leave the event trigger owner's superuser rule to
+  the server (42501); pgMS can offer only superusers in its owner picker.
+  Not written: `ALTER TRIGGER … DEPENDS ON EXTENSION`, a constraint
+  trigger's `FROM referenced_table`.
 - **Not read:** a trigger's dependency on the columns its WHEN names
   (`pg_depend`, P4.14); `ALTER TRIGGER … DEPENDS ON EXTENSION` (deptype
   `'x'`; a trigger is then dropped with the extension but stays a user
@@ -396,11 +399,11 @@ scripter writes `CREATE EXTENSION` for a member, never the member's DDL.
   `directory`, `encoding`, `no_relocate` 16+); which extensions require an
   installed one (the reverse of `Requires`, for DROP … CASCADE — `Requires`
   over the listing, inverted in Go).
-- **No writes yet**: `CREATE EXTENSION … [SCHEMA] [VERSION] [CASCADE]`,
-  `ALTER EXTENSION … UPDATE [TO]`, `SET SCHEMA`, `ADD`/`DROP` member,
-  `DROP EXTENSION … [CASCADE]`, `COMMENT ON EXTENSION` are P4.13.3. Who may
-  create one is `AvailableExtensionVersion.Superuser`/`Trusted` and CREATE
-  on the database — a refusal pgMS can show before sending.
+- **Writes (P4.13.3) leave out** `ALTER EXTENSION … ADD`/`DROP` member
+  (an extension author's tool). Who may create one is
+  `AvailableExtensionVersion.Superuser`/`Trusted` and CREATE on the
+  database — a refusal pgMS can show before sending; pgmo leaves it to the
+  server (42501).
 
 ## Tablespaces, collations, text search, languages, casts, operators: what P4.11 left
 
@@ -417,9 +420,9 @@ scripter writes `CREATE EXTENSION` for a member, never the member's DDL.
   statistics objects, publications and subscriptions** have no family
   yet; extension members of those kinds are named by `Extension.Members`
   alone.
-- **No writes here.** Tablespace create/rename/owner/options/drop is
-  P4.13.3 (`CREATE TABLESPACE` cannot run in a transaction); the others
-  are scripted by P5 from these reads.
+- **Writes:** tablespaces only (P4.13.3); collations, text search
+  objects, languages, casts and operators are scripted by P5 from these
+  reads and not written.
 
 ## Foreign data: what P4.12 left
 
@@ -480,3 +483,104 @@ statement, or the Fake reopens late. Either the soft cap evicts an entry a
 statement is about to use (a pgmo bug, `database_pools.go` `lease`/`evict`)
 or the Fake's reopen races its close. Not investigated yet.
 Seen again 2026-11-21 during P4.1 (2 of 8 runs under `-race`).
+
+## Object writes: what P4.13.3 left
+
+- **Not written** (each a candidate when a pgMS dialog needs it):
+  - tables: `SET TABLESPACE`, `SET LOGGED/UNLOGGED`, `SET (…)`/`RESET (…)`
+    storage parameters after the create, `ATTACH`/`DETACH PARTITION`,
+    `INHERIT`/`NO INHERIT`, `ALTER COLUMN … ADD/SET/DROP IDENTITY` and an
+    identity's sequence options, `SET EXPRESSION` (17+), `SET COMPRESSION`,
+    `ADD CONSTRAINT … USING INDEX`, `CREATE TABLE … LIKE`/`OF type`/`IF NOT
+    EXISTS`, temporary tables (a pool's session ends at random), `USING`
+    a table access method. (Row-level security: P4.13.4, `policy_write.go`.)
+  - indexes: `REINDEX` (maintenance, P10), `ALTER INDEX … SET TABLESPACE`,
+    `SET (…)`, `ATTACH PARTITION`, `ALTER COLUMN … SET STATISTICS`.
+  - views: `ALTER VIEW … SET (…)`/`ALTER COLUMN … SET DEFAULT`; a
+    materialized view's `USING` access method, `SET TABLESPACE`.
+  - routines: `ALTER FUNCTION`'s partial forms (volatility, cost,
+    `SET`/`RESET`) — a redefinition goes through `OrReplace`, which resets
+    every attribute left unset; a SQL-standard body (`BEGIN ATOMIC`, 14+;
+    `Body` is always dollar-quoted, the `AS` form); C functions (`AS 'obj',
+    'symbol'`), `SUPPORT`, `TRANSFORM`, `WINDOW`; aggregates (no writes).
+  - types: composite `ADD`/`DROP`/`ALTER ATTRIBUTE`, `ALTER TYPE … SET
+    (…)`, base and shell types (an extension's).
+  - sequences: `SET LOGGED/UNLOGGED`, `NO MINVALUE`/`NO MAXVALUE` (nil leaves
+    a value as it is; there is no way to ask for the type's bound again).
+  - the families with reads and no writes: collations, text search
+    objects, languages, casts, operators, foreign data (P4.12).
+- **An overloaded routine's create returns its handle**, not the read
+  object (`unlessAmbiguous`): matching the request's type text to
+  `ArgumentTypeNames` would need the server's resolution of each type name
+  (`'int'::regtype`), under the creating session's `search_path`. A
+  `to_regprocedure` read of the Signature would do it; not worth a read
+  until a caller needs the OID at once.
+- **`CreateIndex` and `AddConstraint` return only an error**: an index and
+  a constraint are parts, read with their relation's `Indexes` and
+  `Constraints` (no `IndexByName`). With `Name` empty the server's chosen
+  name is unknown until that read.
+- **A failed `CREATE INDEX CONCURRENTLY` leaves an invalid index**
+  (`Index.Valid` false); pgmo does not drop it. pgMS should offer to.
+- **`SetDefault`, `AlterColumn(Default)` mirror the text as given**; the
+  server stores its own rendering (`'x'::text` for `'x'`). Read again to
+  compare.
+
+## Privilege writes: what P4.13.4 left
+
+- **No effective privileges.** `Privileges` is the ACL as stored; what a
+  role can do through membership is `has_*_privilege` per object and
+  privilege (or `aclexplode` joined to the role's transitive memberships).
+  pgMS's permission pages (P8) will want one read per object kind for a
+  role; add it to P5 with the scripter's ACL rendering.
+- **ACLs not read yet:** a database's (`datacl`), a parameter's
+  (`pg_parameter_acl`, which has no other read), a large object's
+  (`pg_largeobject_metadata`; large objects have no family). Each is written
+  by `ApplyPrivileges`; `TestLivePrivilegeWrites` reads them by hand.
+- **One securable per statement.** GRANT takes a list (`ON TABLE a, b`);
+  `ApplyPrivileges` writes one, or ALL … IN SCHEMA. A pgMS multi-select
+  grant is one call per object — inside `InTransaction` to be atomic.
+- **Not offered:** `GRANTED BY` (15–18 accept only the current user,
+  0A000); `REVOKE … RESTRICT` (the default, written by omission); a role
+  spec keyword (`CURRENT_USER`, `SESSION_USER`, `CURRENT_ROLE`) — a
+  grantee is a name, quoted, so pgMS resolves the current role itself;
+  `ALTER DEFAULT PRIVILEGES … ON ROUTINES` (the same `f` entry as
+  FUNCTIONS, which is what pg_dump writes).
+- **A revoke back to the default leaves an explicit ACL** (`{owner=…}`)
+  where the catalog held NULL: `PrivilegesDefault` turns false though the
+  privileges are the same. That is the server's; pgmo cannot write NULL.
+  A pgMS permissions dialog comparing "changed from default" should compare
+  the privileges, not the flag.
+- **Policies:** no `Database.Policies` listing over every table (pgMS's
+  Object Explorer reads them per table); `Alter` mirrors nothing (the
+  server renders); a policy's command or AS RESTRICTIVE is changed by drop
+  and create — a pgMS edit dialog should do both in one `InTransaction`.
+
+## Dependencies and search: what P4.14 left
+
+- **Definition search is case-sensitive.** `SearchDefinitions` matches
+  `strpos` as written: SQL `lower()` is refused by
+  `TestNoCaseFoldingOfNames` (a SQL literal has no allowlist), and under
+  the catalog's "C" collation it would fold ASCII alone anyway. A pgMS
+  "match case" off needs either an allowlist for SQL literals whose text is
+  not a name, or `ILIKE` with escaping — decide with the author.
+- **Rendered definitions follow the session's `search_path`**
+  (`pg_get_viewdef`, `pg_get_function_sqlbody`), so a table on the path is
+  searched unqualified — the same helper P4.4's open thread wants
+  (`SET LOCAL search_path` in a read-only transaction).
+- **Not searched:** indexes, constraints, policies (a table's parts),
+  rules, a trigger's WHEN, check and default expressions; the families
+  without a schema (event triggers, extensions, languages, casts, FDWs and
+  servers) and the schema-scoped ones without a database listing in the
+  union (collations, text search, operators). Add a branch when pgMS's
+  search needs one; the union's columns stay the same.
+- **No column-level reads.** `ObjectAddress` has no sub-ID: a column's
+  dependencies are its table's, told apart by `OwnPart`. Add `SubID` if
+  pgMS offers Dependencies on a column node.
+- **Not folded:** a publication's relation and schema rows
+  (`pg_publication_rel`, `pg_publication_namespace`: automatic edges to two
+  owners — they come back as dependents of the table and the
+  publication), extended statistics (an object of its own with a name).
+- **Dependency order for scripting** (P5.3) needs raw edges, not folded
+  ones — `pg_dump`'s own sort; P5 adds its read.
+- **`REASSIGN OWNED`/`DROP OWNED` take names only** — no `CURRENT_USER`
+  keyword, as grantees (§ Privilege writes).

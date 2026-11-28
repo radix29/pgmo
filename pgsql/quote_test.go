@@ -133,3 +133,19 @@ func TestImportsOnlyStdlib(t *testing.T) {
 		}
 	}
 }
+
+func TestQuoteDollar(t *testing.T) {
+	for _, c := range []struct{ in, want string }{
+		{"", "$$$$"},
+		{"select 1", "$$select 1$$"},
+		{"it's a\\b", "$$it's a\\b$$"},
+		{"$1 + 1", "$_$$1 + 1$_$"},
+		{"x$", "$_$x$$_$"},
+		{"a$_", "$__$a$_$__$"},
+		{"$$ BEGIN END $$", "$_$$$ BEGIN END $$$_$"},
+	} {
+		if got := QuoteDollar(c.in); got != c.want {
+			t.Errorf("QuoteDollar(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}

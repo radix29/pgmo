@@ -181,6 +181,25 @@ var statementGates = []statementGate{
 	{"virtual generated column", PostgreSQL18, nil,
 		`CREATE TEMP TABLE pgmo_gate_virtual (a int, b int GENERATED ALWAYS AS (a * 2) VIRTUAL)`,
 		"42601"},
+	// ConstraintSpec.NotEnforced: a check or foreign key declared and never
+	// checked (CreateTable, AddConstraint).
+	// CreateEventTrigger's EventTriggerLogin.
+	{"login event trigger", PostgreSQL17,
+		[]string{`CREATE FUNCTION pg_temp.pgmo_gate_evt() RETURNS event_trigger LANGUAGE plpgsql AS $$BEGIN END$$`},
+		`CREATE EVENT TRIGGER pgmo_gate_login ON login EXECUTE FUNCTION pg_temp.pgmo_gate_evt()`,
+		"42601"},
+	{"NOT ENFORCED constraint", PostgreSQL18, nil,
+		`CREATE TEMP TABLE pgmo_gate_not_enforced (a int, CONSTRAINT c CHECK (a > 0) NOT ENFORCED)`,
+		"42601"},
+	// PrivilegeMaintain in ApplyPrivileges and AlterDefaultPrivileges.
+	{"MAINTAIN privilege", PostgreSQL17,
+		[]string{`CREATE TEMP TABLE pgmo_gate_maintain (a int)`},
+		`GRANT MAINTAIN ON pg_temp.pgmo_gate_maintain TO PUBLIC`,
+		"42601"},
+	// AlterDefaultPrivileges' DefaultPrivilegeLargeObjects.
+	{"default privileges on large objects", PostgreSQL18, nil,
+		`ALTER DEFAULT PRIVILEGES FOR ROLE CURRENT_USER GRANT SELECT ON LARGE OBJECTS TO PUBLIC`,
+		"42601"},
 	// ICU tailoring rules came to collations and databases together;
 	// CREATE DATABASE … ICU_RULES cannot be probed in a transaction, so the
 	// collation's form stands for both (CreateDatabase's gate).

@@ -592,3 +592,79 @@ func (r *Role) RemoveMember(ctx context.Context, member string, opts RevokeMembe
 	}
 	return nil
 }
+
+// SetComment sets the role's comment (COMMENT ON ROLE), "" removing it,
+// mirrored onto Comment (not under WithScript). The role needs CREATEROLE
+// and ADMIN on the role, or to be it.
+func (r *Role) SetComment(ctx context.Context, text string) error {
+	if r.Name == "" {
+		return invalidf("pgmo: comment on role: no name")
+	}
+	if _, err := r.server.exec(ctx, commentStatement("ROLE "+pgsql.QuoteIdent(r.Name), text)); err != nil {
+		return fmt.Errorf("pgmo: comment on role %q: %w", r.Name, err)
+	}
+	setIfApplied(ctx, &r.Comment, text)
+	return nil
+}
+
+// ------------------------------------------------------------
+// Objects owned: REASSIGN OWNED, DROP OWNED
+// ------------------------------------------------------------
+//
+// What stops a DROP ROLE is what depends on the role (2BP01): the objects
+// it owns and the privileges and policies naming it, in every database.
+// Database.Dependents on the role's Address() lists them per database and
+// Server.DependentDatabases names the databases; these two clear them, one
+// database at a time, as the server does — each runs in d.
+
+// ownedRoles quotes roles for an OWNED BY list, refusing none or an empty
+// name.
+func ownedRoles(roles []string) (string, error) {
+	if len(roles) == 0 {
+		return "", invalidf("no role")
+	}
+	if err := requireNames("the roles", roles); err != nil {
+		return "", err
+	}
+	return identList(roles), nil
+}
+
+// ReassignOwned gives every object roles own in the database to newOwner:
+// REASSIGN OWNED BY … TO …, run in d. The databases and tablespaces they
+// own are shared objects, and the server reassigns them too, from any
+// database; their privileges are left as they are (DropOwned revokes them).
+// An empty role or newOwner is refused (ErrInvalidRequest); the server
+// refuses an unknown role (42704) and a role the caller is not a member of
+// (42501).
+func (d *Database) ReassignOwned(ctx context.Context, roles []string, newOwner string) error {
+	what := fmt.Sprintf("reassign objects owned in database %q", d.Name)
+	list, err := ownedRoles(roles)
+	if err == nil && newOwner == "" {
+		err = invalidf("no new owner")
+	}
+	if err != nil {
+		return fmt.Errorf("pgmo: %s: %w", what, err)
+	}
+	if err := d.exec(ctx, "REASSIGN OWNED BY "+list+" TO "+pgsql.QuoteIdent(newOwner)); err != nil {
+		return fmt.Errorf("pgmo: %s: %w", what, err)
+	}
+	return nil
+}
+
+// DropOwned drops every object roles own in the database and revokes every
+// privilege they hold there and on the shared objects: DROP OWNED BY …,
+// run in d. A policy naming one of them loses it, and goes when it names
+// no other role. The databases and tablespaces they own are not dropped.
+// opts.Cascade drops what depends on those objects too (CASCADE); without
+// it the server refuses while anything does (2BP01). Never a default.
+func (d *Database) DropOwned(ctx context.Context, roles []string, opts DropOptions) error {
+	what := fmt.Sprintf("drop objects owned in database %q", d.Name)
+	list, err := ownedRoles(roles)
+	if err != nil {
+		return fmt.Errorf("pgmo: %s: %w", what, err)
+	}
+	if err := d.exec(ctx, "DROP OWNED BY "+list+opts.clause()); err != nil {
+		return fmt.Errorf("pgmo: %s: %w", what, err)
+	}
+	return nil
+}

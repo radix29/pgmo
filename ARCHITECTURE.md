@@ -37,8 +37,8 @@ about every entry, both directions; it passes on pg15–pg18. The headlines:
 | Since | What |
 |---|---|
 | 16 | `pg_stat_io`; `pg_auth_members.inherit_option`/`set_option`/`oid` and `GRANT … WITH INHERIT/SET`; `EXPLAIN (GENERIC_PLAN)`; `pg_create_subscription`, `pg_use_reserved_connections`; `daticurules`/`collicurules`; `pg_stat_all_tables.last_seq_scan`… |
-| 17 | `pg_stat_checkpointer`, and `pg_stat_bgwriter` loses its checkpoint and backend counters; `daticulocale`→`datlocale`, `colliculocale`→`colllocale`; builtin collation provider; `MERGE … RETURNING`; `EXPLAIN (SERIALIZE, MEMORY)`; `pg_maintain`; replication-slot failover columns |
-| 18 | virtual generated columns; `pg_stat_io.op_bytes` → `read_bytes`/`write_bytes`/`extend_bytes`; `pg_stat_wal` loses its write/sync counters; `conenforced`/`conperiod`; `relallfrozen`; `pg_signal_autovacuum_worker` |
+| 17 | `pg_stat_checkpointer`, and `pg_stat_bgwriter` loses its checkpoint and backend counters; `daticulocale`→`datlocale`, `colliculocale`→`colllocale`; builtin collation provider; `MERGE … RETURNING`; `EXPLAIN (SERIALIZE, MEMORY)`; `pg_maintain` and the MAINTAIN privilege; replication-slot failover columns |
+| 18 | virtual generated columns; `pg_stat_io.op_bytes` → `read_bytes`/`write_bytes`/`extend_bytes`; `pg_stat_wal` loses its write/sync counters; `conenforced`/`conperiod`; `relallfrozen`; `pg_signal_autovacuum_worker`; default privileges on large objects |
 | ext | `pg_stat_statements` 1.11 renames `blk_*_time` → `shared_blk_*_time` and adds `local_blk_*_time`, `jit_deform_*`, `stats_since`; 1.12 adds `wal_buffers_full`, `parallel_workers_*`; `jit_*` is 1.10, `*_exec_time` 1.8 |
 
 Ungated, though the plan listed them: `pg_stat_progress_copy` (14) and
@@ -1233,6 +1233,221 @@ option the release has, the others refused; the server refusals above;
 drop refused while a privilege is held, then done, then 42704; a create,
 alter and grant rolled back with their transaction.
 
+### Object writes (`object_write.go` and the `*_write.go` files)
+
+Landed P4.13.3: the writes of every database-scoped family with a read,
+and of tablespaces, plus the comments. Each is a method on the family's
+handle, so it works on a `…Ref` as on a read object.
+
+| Family | Create | On the handle |
+|---|---|---|
+| Schema | `Database.CreateSchema(CreateSchemaRequest{Name, Owner})` | `Drop`, `Rename`, `SetOwner`, `SetComment` |
+| Table | `Database.CreateTable(CreateTableRequest)` — `Columns []ColumnSpec`, `Constraints []ConstraintSpec`, `Unlogged`, `Inherits`, `PartitionBy`, `PartitionOf` + `PartitionBound`, `Tablespace`, `Options` | `Drop`, `Rename`, `SetSchema`, `SetOwner`, `SetComment`; `AddColumn`, `DropColumn`, `RenameColumn`, `AlterColumn(name, ColumnChanges)`, `SetColumnComment`; `AddConstraint`, `DropConstraint`, `RenameConstraint`, `ValidateConstraint`, `SetConstraintComment`; `CreateIndex`, `DropIndex`, `RenameIndex`, `SetIndexComment` |
+| View | `Database.CreateView(CreateViewRequest)` — `OrReplace`, `Columns`, `CheckOption`, `SecurityBarrier`, `SecurityInvoker` | `Drop`, `Rename`, `SetSchema`, `SetOwner`, `SetComment` |
+| Materialized view | `Database.CreateMaterializedView(…)` — `Columns`, `NoData`, `Tablespace`, `Options` | `Refresh(RefreshMaterializedViewOptions{Concurrently, NoData})`, the index writes, `Drop`, `Rename`, `SetSchema`, `SetOwner`, `SetComment` |
+| Function, procedure | `Database.CreateFunction`/`CreateProcedure` — `OrReplace`, `Arguments []RoutineArgumentSpec`, `Returns`/`ReturnsSet` (or `ArgumentTable` columns), `Language`, `Body`, the attributes, `Settings` | `Drop`, `Rename`, `SetSchema`, `SetOwner`, `SetComment` — all by `Signature()` |
+| Sequence | `Database.CreateSequence(CreateSequenceRequest{…, Unlogged, SequenceOptions})` | `Alter(SequenceChanges{SequenceOptions, Restart})`, `Drop`, `Rename`, `SetSchema`, `SetOwner`, `SetComment` |
+| Type | `Database.CreateEnumType`, `CreateCompositeType`, `CreateRangeType` | `AddEnumValue(label, EnumValuePosition)`, `RenameEnumValue`, `Drop`, `Rename`, `SetSchema`, `SetOwner`, `SetComment` |
+| Domain | `Database.CreateDomain(CreateDomainRequest)` | `SetDefault`, `SetNotNull`, `AddConstraint`, `DropConstraint`, `ValidateConstraint`, `Drop`, `Rename`, `SetSchema`, `SetOwner`, `SetComment` |
+| Trigger | `Database.CreateTrigger(CreateTriggerRequest)` — `OrReplace`, `Constraint` (+ deferral), timing, events, `UpdateColumns`, transition tables, `ForEachRow`, `When`, `Function`, `Arguments` | `SetEnabled(TriggerEnabled)` (`ALTER TABLE … ENABLE/DISABLE TRIGGER`), `Drop`, `Rename`, `SetComment` — named `name ON table` |
+| Event trigger | `Database.CreateEventTrigger(CreateEventTriggerRequest{Name, Event, Tags, Function})` — `login` 17+ | `SetEnabled`, `Drop`, `Rename`, `SetOwner`, `SetComment` |
+| Extension | `Database.CreateExtension(CreateExtensionRequest{Name, Schema, Version, Cascade})` | `Update(version)`, `SetSchema`, `Drop`, `SetComment` |
+| Tablespace | `Server.CreateTablespace(CreateTablespaceRequest{Name, Owner, Location, Options})` | `Drop`, `Rename`, `SetOwner`, `SetOptions`, `ResetOptions`, `SetComment` |
+| Database, role | — | `Database.SetComment`, `Role.SetComment` |
+
+- **Where each runs.** A schema-scoped object's statement goes through
+  `Database.exec` → `execIn(d.Name)`: the database's own pool, or inside
+  `InTransaction` the transaction when it is bound to that database (any
+  other is refused, `ErrUnsupported`). A tablespace's, a database's and a
+  role's comment go through `s.exec` — they are cluster-wide.
+- **The shared forms** (`object_write.go`): `ddlObject` is an object as
+  DROP/ALTER/COMMENT ON name it (keyword + DDL name + session), and
+  `dropObject`/`renameObject`/`moveObject`/`ownObject`/`commentObject` the
+  five forms every handle forwards to, mirroring the changed field through
+  `setIfApplied`. `DropOptions{Cascade}` is the one drop choice — CASCADE
+  only when asked (P8.7's Delete offers it explicitly). `COMMENT … IS NULL`
+  for `""`: the server stores no empty comment, and `Comment` reads `""` for
+  none.
+- **Names and SQL.** Every name is `QuoteIdent`/`QualifiedName`; a routine
+  is named by `Signature()`; a value (enum label, trigger argument, storage
+  parameter, extension version, tablespace location) is `QuoteLiteral`. SQL
+  the caller writes — a type, a default, a check, a generation or partition
+  clause, a view's query, a WHEN, an index expression or predicate — is
+  written as given; its field says so. A routine body is dollar-quoted by
+  `pgsql.QuoteDollar` (pg_dump's `appendStringLiteralDQ`: `$$`, then `$_$`,
+  `$__$`… — the first whose opening part is not in the body; fuzzed against
+  the scanner in `FuzzNames`). Storage parameters are written
+  `name = 'value'`, a `toast.` prefix as a qualifier.
+- **A schema is required**, never defaulted (`ErrSchemaRequired`): on a
+  create, a handle, a referenced table, a parent, a trigger's function, a
+  sequence's `OWNED BY` table.
+- **Refused before sending** (`ErrInvalidRequest` unless noted): a field the
+  constraint's `Kind` does not take (INCLUDE on a check, DEFERRABLE on a
+  check, NOT VALID/NOT ENFORCED on a key…); `ConstraintNotNull` (it is the
+  column's); a column with more than one of default, identity and
+  generation; `NOT VALID` in `CreateTable` and `CreateDomain` — checked on
+  15 and 18, CREATE TABLE accepts the table-level words and stores the
+  constraint validated anyway; `DropIndexOptions{Concurrently, Cascade}`
+  together (the server's 0A000); REFRESH CONCURRENTLY WITH NO DATA; a
+  partition with columns or parents, a bound without a parent. A virtual
+  generated column and `NOT ENFORCED` before 18 are `ErrUnsupportedVersion`
+  (inventory: "virtual generated column", "NOT ENFORCED constraint"), and
+  so is the `login` event trigger before 17 ("login event trigger").
+- **Not in a transaction block** (checked on 15 and 18, 25001): `CREATE
+  INDEX CONCURRENTLY`, `DROP INDEX CONCURRENTLY`, `CREATE TABLESPACE`, `DROP
+  TABLESPACE` — `refuseInTx` (`ErrUnsupported`). `REFRESH MATERIALIZED VIEW
+  CONCURRENTLY`, `ALTER TYPE … ADD VALUE` and `CREATE EXTENSION` run in one.
+- **Left to the server**, each held live with its SQLSTATE: a drop with
+  dependents (2BP01: a view over a table, a trigger on a function, a column
+  of an extension's type, a non-empty schema, a key a foreign key uses, a
+  constraint's index dropped as an index); a tablespace holding a table
+  (55000); a NOT VALID check validated against a bad row (23514); REFRESH
+  CONCURRENTLY of an unpopulated view (0A000); a trigger on a view
+  enabled/disabled (42809, not tested live).
+- **Read-back.** Each `CreateX` returns `XByName`'s object (`createdObject`);
+  under `WithScript`, or when the read finds nothing, the `…Ref` handle.
+  `CreateFunction`/`CreateProcedure` read by schema and name: with overloads
+  sharing them, the new one cannot be told from the request's type text
+  (`int` is `integer`), so `ErrAmbiguous` becomes the handle too
+  (`unlessAmbiguous`), whose `Signature()` names it. An index and a
+  constraint are parts — `CreateIndex`/`AddConstraint` return only an error;
+  read `Indexes`/`Constraints`.
+- **Mirroring**: name, schema, owner, comment on every handle; `Populated`
+  after `Refresh`; an enum's `Labels` (inserted where `EnumValuePosition`
+  puts them); a sequence's options; a domain's `Default`/`NotNull`; a
+  trigger's `Enabled`; an extension's `Version` (when named) and `Schema`.
+  Not mirrored: parts (columns, constraints, indexes), a domain's
+  constraints, tablespace options.
+
+Tests: `script_table_write_test.go` and `script_object_write_test.go` — the
+exact statement of every write and option (156 cases), through
+quote-hostile names, captured as run in the object's database (or the
+Server's for the cluster-wide ones) with nothing sent to either
+(`runScriptCasesIn`). `object_write_test.go` — every refusal, scripting or
+not, sending and capturing nothing; the 18 gates; the four statements
+refused in a transaction block and a write to another database refused
+inside `InTransaction`, the rest on the transaction; mirroring only when
+applied (the cluster-wide comments and an event trigger's state too);
+empty changes send nothing; the read-backs (handle when hidden or
+scripted, error wrapped once). `object_write_internal_test.go` —
+`unlessAmbiguous`. `TestLiveObjectWrites` (pg15–pg18), on a throwaway
+database written from a Server on postgres: every family created and read
+back field by field; the CREATE TABLE captured under `WithScript`, run by
+hand in another schema, makes an identical table (columns and constraints);
+every ALTER read back equal to the mirror; a NOT VALID check refused then
+validated; partitions (a default one, a sub-partitioned one) and
+inheritance; CREATE/DROP INDEX CONCURRENTLY for real; an overloaded
+function's handle; every trigger and event trigger state, a login event
+trigger on 17+, an event trigger refused a plain owner (42501); citext created at 1.5 and updated;
+an in-place tablespace (a Server with `allow_in_place_tablespaces`); the
+server refusals above; writes rolled back with `InTransaction` leaving
+nothing. 56 offline mutations of the write files: 55 caught, the one
+survivor (`Database.SetComment`'s mirroring) caught after
+`TestClusterCommentsMirrorOnlyWhenApplied` was added.
+
+### Privilege writes and row-level security (`privilege_write.go`, `policy_write.go`)
+
+Landed P4.13.4: gosmo's `ApplyPermission` for PostgreSQL, default
+privileges, and row-level security.
+
+| What | API |
+|---|---|
+| GRANT / REVOKE on an object in a database | `Database.ApplyPrivileges(ctx, Securable, PrivilegeChange)` |
+| … on a database, a tablespace, a parameter | `Server.ApplyPrivileges(ctx, Securable, PrivilegeChange)` |
+| ALTER DEFAULT PRIVILEGES | `Database.AlterDefaultPrivileges(ctx, DefaultPrivilegeScope{Roles, Schemas, ObjectType}, PrivilegeChange)` |
+| Row-level security | `Table.SetRowSecurity(enabled)`, `Table.SetForceRowSecurity(force)` |
+| Policies | `Database.CreatePolicy(CreatePolicyRequest{Schema, Table, Name, Restrictive, Command, Roles, Using, WithCheck})`; on the handle `Alter(PolicyChanges{Roles, Using, WithCheck})`, `Rename`, `SetComment`, `Drop` — named `name ON table` |
+
+- **`PrivilegeChange`** is one statement: `Action` (`ActionGrant`,
+  `ActionRevoke` — PostgreSQL has no DENY), `Privileges` or `All` (ALL
+  PRIVILEGES; exactly one), `Grantees` (`""` is PUBLIC, written `PUBLIC`;
+  every other name quoted, so `"current_user"` is a role of that name),
+  `GrantOption` (WITH GRANT OPTION on a GRANT, GRANT OPTION FOR on a REVOKE)
+  and `Cascade` (REVOKE only, never a default).
+- **`Securable`** is `Kind` (the ON keyword: TABLE — which also takes
+  views, materialized views and foreign tables — SEQUENCE, DATABASE,
+  DOMAIN, FOREIGN DATA WRAPPER, FOREIGN SERVER, FUNCTION, PROCEDURE,
+  ROUTINE, LANGUAGE, LARGE OBJECT, PARAMETER, SCHEMA, TABLESPACE, TYPE),
+  `Schema` (required exactly for the schema-scoped kinds), `Name` (a large
+  object's OID in decimal, a parameter's name — quoted whole, which the
+  server lowercases and accepts dotted), `Arguments` (a routine's
+  `ArgumentTypeNames`, required: a routine is always named by its
+  signature), `Columns` (TABLE only: `GRANT SELECT (a, b)`) and
+  `AllInSchema` (`ON ALL TABLES|SEQUENCES|FUNCTIONS|PROCEDURES|ROUTINES IN
+  SCHEMA`). Every family's handle gives its own with `Securable()`; an
+  aggregate's is a FUNCTION.
+- **The allowlist.** A privilege is a keyword, never quoted, so each kind
+  takes only its own (`securableKinds`; a column SELECT/INSERT/UPDATE/
+  REFERENCES; the default-privilege object types the matching kind's) and
+  anything else — a lower-case or injected text included — is
+  `ErrInvalidRequest` before sending. MAINTAIN before 17 and default
+  privileges on LARGE OBJECTS before 18 are `ErrUnsupportedVersion`
+  (inventory: "MAINTAIN privilege", "default privileges on large
+  objects"); ALL PRIVILEGES is the server's to expand on any release.
+- **Refused before sending** (`ErrInvalidRequest`): an unknown action or
+  kind; no grantees; no privileges, or both a list and All; CASCADE on a
+  GRANT; a shared kind through `Database.ApplyPrivileges` or the other way
+  round; a missing schema (`ErrSchemaRequired`) or name; a schema on a kind
+  outside one; columns on anything but one table, or an empty column list
+  (nil is the whole table); a routine without argument types, arguments on
+  anything else; ALL … IN SCHEMA for a kind without the form, or naming an
+  object; a large object that is not a canonical non-zero 32-bit OID; an
+  empty FOR ROLE or IN SCHEMA list (nil is the connected role, database-wide).
+- **`GRANTED BY` is not offered**: checked on 15–18, a GRANT or REVOKE
+  accepts only the current user there (0A000), which is what it records
+  anyway. A superuser's grant is recorded as the owner's.
+- **Left to the server**, each held live with its SQLSTATE: an unknown role
+  (42704); a sequence named as `SecurableSequence` that is a table (42809);
+  a routine's argument types matching none (42883); WITH GRANT OPTION to
+  PUBLIC (0LP01); IN SCHEMA on default privileges for schemas (0LP01); a
+  used grant option revoked without CASCADE (2BP01); a policy or row-level
+  security on a view or foreign table (42809); USING on an INSERT policy or
+  WITH CHECK on a SELECT/DELETE one (42601).
+- **Where each runs.** `Database.ApplyPrivileges`,
+  `AlterDefaultPrivileges` and the policy writes through `Database.exec` (the
+  database's own session, the transaction inside `InTransaction` when bound
+  to it); `Server.ApplyPrivileges` through `s.exec`. Every one runs in a
+  transaction block.
+- **Mirroring**: `RowSecurity`, `ForceRowSecurity`, a policy's `Name` and
+  `Comment`. Not mirrored: a grant (the server merges it into one ACL item
+  per grantee and grantor — read `Privileges` again) and `Policy.Alter`
+  (the server renders the expressions, and stores a role list holding
+  PUBLIC as PUBLIC alone). An empty `PolicyChanges` sends nothing;
+  ALTER POLICY cannot remove an expression, so `""` is refused. A policy's
+  command and AS RESTRICTIVE cannot be altered.
+- **Read-back.** `CreatePolicy` returns `PolicyByName`'s policy, the
+  `PolicyRef` under `WithScript` or when hidden. `Policy` now carries its
+  table's `Schema`/`Table` and its `Database()`, from `Table.Policies` too.
+
+Tests: `script_privilege_write_test.go` — the exact statement of every kind,
+modifier, default-privilege form, row-level security and policy write (56
+cases), quote-hostile, captured in the object's database or the Server's.
+`privilege_write_test.go` — every refusal above, scripting or not, sending
+and capturing nothing; the gates on 15–18; a write to another database
+refused inside `InTransaction` and the rest (a shared object's grant too) on
+the transaction; mirroring only when applied; an empty `Alter`; the policy
+read-back; every handle's `Securable()`. `TestLivePrivilegeWrites`
+(pg15–pg18), on a throwaway database: every privilege of every kind in a
+database granted with grant option to two roles (one quote-hostile) and ALL
+to PUBLIC, read back through the family's own `Privileges`, a grant option
+then everything revoked; column grants; ALL … IN SCHEMA; the captured GRANT
+run by hand giving the same ACL; a grant option passed on, refused revoking
+without CASCADE (2BP01), revoked with it; the database's, an in-place
+tablespace's and a custom parameter's ACLs (the server drops a parameter's
+row once back at the default); a large object; default privileges read back
+by `DefaultPrivileges` and given to a table the role creates afterwards,
+large objects on 18; row-level security and policies — a plain role seeing
+0, 2, 1, 0 rows through default deny, a permissive policy, its alter and a
+restrictive one, the owner filtered only when forced, a captured CREATE
+POLICY run by hand; the server refusals above; a rolled-back
+`InTransaction` leaving nothing. A live test never grants on a
+pre-existing object: a revoke back to the default leaves an explicit ACL
+where there was NULL (a first version did this to `pg_default`, which the
+sweep caught). 39 offline mutations of `privilege_write.go`,
+`policy_write.go` and `policy.go`: 37 caught, the two survivors
+(`RowSecurity` mirrored under `WithScript`, `PolicyByName` without its name
+condition) caught after the tests were tightened.
+
 ### Schemas and privileges (`schema.go`, `privileges.go`)
 
 Landed P4.3 (reads; the writes are P4.13.3 and P4.13.4). gosmo's `Schema`
@@ -1325,7 +1540,7 @@ none:
 | `Constraints` → `[]*Constraint` | `pg_constraint` (`contype <> 't'`) | `pg_get_constraintdef`; `conkey`/`confkey` named in key order; `Enforced` is `conenforced` from 18 and `true` before (`colSince`, golden `constraint.sql`); 18's NOT NULL rows (`contype 'n'`) are listed; `Index` for `p`/`u`/`x`; FK actions and match type as `ForeignKeyAction`/`ForeignKeyMatch`, empty for other kinds |
 | `Indexes` → `[]*Index` | `pg_index` + `pg_class`, `pg_am`, `pg_constraint`, `pg_tablespace` | `pg_get_indexdef` (table always qualified); `KeyColumns`/`IncludedColumns` per column from `pg_get_indexdef(oid, k, true)` over `indnkeyatts`/`indnatts`; `Predicate`; `Valid`; `NullsNotDistinct` (15); `Constraint` it enforces |
 | `Triggers` → `[]*Trigger` | `pg_trigger` (`NOT tgisinternal`) + `pg_proc` | the trigger family's read keyed by the table's OID (§ Triggers and event triggers) |
-| `Policies` → `[]*Policy` | `pg_policy` | `Command`, `Permissive`, `Roles` in stored order (PUBLIC `""`), `Using`/`WithCheck` |
+| `Policies` → `[]*Policy` | `pg_policy` | `Schema`/`Table` (the table's), `Command`, `Permissive`, `Roles` in stored order (PUBLIC `""`), `Using`/`WithCheck`; one by name: `Database.PolicyByName(schema, table, name)`, `PolicyRef` (P4.13.4) |
 | `Children` → `[]ChildTable` | `pg_inherits` (`inhparent = oid`) | direct only; `Kind` may be a foreign table; `PartitionBound`, `DetachPending` |
 | `Size` → `TableSize` | `pg_table_size`, `pg_indexes_size`, `pg_total_relation_size` | on demand (stats files); any role may call them; 0 for a partitioned table; a dropped table is `ErrNotFound` |
 
@@ -1979,6 +2194,107 @@ under a path finding the types; a `Signature` replayed in `COMMENT ON`;
 **every routine of the database** (pg_catalog's included) listed with the
 identity `routineIdentityColumns` reads for it; and the listings with their
 bodies read again as a plain role, identical.
+
+### Dependencies and search (`dependency.go`, `object_address.go`, `search.go`)
+
+Landed P4.14: gosmo's `Dependencies`/`Dependents`/`Search`/
+`SearchDefinitions`, plus the objects-owned writes the role open thread
+waited on.
+
+**Addresses.** An object is named as `pg_depend` names it:
+`ObjectAddress{Catalog, OID}` (`pg_class`, `pg_proc`, `pg_authid`…).
+Every family handle has `Address()` (`object_address.go`, as every handle
+has `Securable()`), and so do `Dependency`, `ExtensionMember` and
+`SearchResult`, so the graph is walked from any of them. A Ref's OID is
+zero: the reads refuse it with `ErrHandleNotLoaded`. `IsShared()` is the
+catalogs of roles, databases, tablespaces and `pg_parameter_acl`.
+
+**Reads.**
+
+| Call | Reads | Object |
+|---|---|---|
+| `Database.Dependencies(ctx, addr)` | `pg_depend` + this database's `pg_shdepend` rows leaving it | in the database; a shared one is `ErrInvalidRequest` |
+| `Database.Dependents(ctx, addr)` | `pg_depend` + this database's `pg_shdepend` rows entering it | in the database, or a role/tablespace (its objects here) |
+| `Server.Dependencies` / `Server.Dependents` | `pg_shdepend` with `dbid = 0` | shared only; anything else `ErrInvalidRequest` |
+| `Server.DependentDatabases(ctx, addr)` | `pg_shdepend` grouped by `dbid` | shared only: the databases whose `Dependents` find more |
+
+One statement each, through `s.onDatabase` (the database's pool) or
+`s.on` (the Server's). The address is bound (`$1` catalog name, resolved in
+`pg_catalog` by `pg_class`; `$2` OID). The statement returns one row even
+for no edge — `pg_identify_object`'s identity of the object, LEFT JOINed to
+the edges — so "no such object" (`ErrNotFound`: a NULL identity, or no row
+for a catalog that is no `pg_catalog` table) and "no edges" (nil) are one
+round trip.
+
+**Folding.** `pg_depend` records an edge on the piece holding it, not on
+the object a person names: a view's references are its `_RETURN` rule's,
+a foreign key its constraint's, a default a `pg_attrdef` row's; a table's
+row and array types, its TOAST table and a constraint's index are objects
+of their own. The query folds both ends: `parts` (recursive, down from the
+object) is it and everything folded into it, `up` (recursive, from each far
+end) climbs to the object that end is folded into. An edge folds when it is
+**internal** (`'i'`) from anything but a sequence, or **automatic** (`'a'`)
+from a default, constraint, rule, trigger, policy or index — never from an
+object to itself: **a partition key column has an internal edge to its own
+table** (found on pg15 and pg18), which otherwise made a partitioned table a
+part of itself. A sequence is never folded (identity or OWNED BY): it is an
+object of its own. The piece each end is recorded on comes back
+(`Part`/`PartType`, `OwnPart`/`OwnPartType`), so folding loses nothing: a
+view depends on `s.t` *via* `s.t.id` *from* its rule; a table depends on a
+function *from* `trigger tr on s.t`. One `Dependency` per edge
+(`DISTINCT`), ordered by type, identity, parts and kind under
+`COLLATE "C"` — the text is `pg_identify_object`'s, which sorts under the
+database's collation otherwise. Kinds are named constants per catalog
+(`DependencyNormal`… for `pg_depend`, `DependencyOwner`… for
+`pg_shdepend`, whose letters overlap); an unknown letter reads
+`pg_depend deptype "q"`, never as another kind.
+
+What the catalogs do not hold is not reported (documented on the type):
+initdb's objects are pinned from 15 and have no rows (`pg_catalog`'s
+dependents are none); a role owned by the bootstrap superuser has no owner
+edge; a relation stored in a tablespace has none (only a partitioned
+table's `'t'`); a PL/pgSQL body is not parsed. A `pg_statistic_ext` row is
+not folded (it has a schema and name of its own).
+
+Cost: plans ~1000 on information_schema's dependents (~10 ms), far below
+`jit_above_cost`.
+
+**Search.** `Database.Search(ctx, ObjectFilter)` is the filter applied to
+one union of the schema-scoped families with a database listing — tables
+(partitioned too), views, materialized views, sequences, foreign tables,
+functions, procedures, aggregates, types and domains (`Database.Types`'
+rule: no implicit arrays or relation row types), triggers (by their table's
+schema; `Table` set) — pushed down by `clause` over the union's columns,
+names folded and matched exactly as every listing's; gosmo's pattern search
+is `Name: {TextContains, pattern}`. `SearchDefinitions(ctx, text, f)`
+matches `text` **as written, case-sensitively** (`strpos`; SQL `lower()`
+is refused by `TestNoCaseFoldingOfNames`) in a view's `pg_get_viewdef`, a
+routine's `pg_get_function_sqlbody` (a SQL-standard body) or `prosrc` (any
+language but C and internal, whose `prosrc` is a symbol). Extension
+membership by a join (a trigger's is its table's), identity by
+`pg_identify_object` after the filter; order by type, schema, name, table,
+identity, `COLLATE "C"`. Plans ~790 over a whole database.
+
+**Writes** (`role_write.go`): `Database.ReassignOwned(ctx, roles,
+newOwner)` — REASSIGN OWNED BY … TO …, which also reassigns the databases
+and tablespaces they own — and `Database.DropOwned(ctx, roles,
+DropOptions{Cascade})` — DROP OWNED BY …, which revokes their privileges
+on the shared objects too and drops a policy naming no other role — both
+through `Database.exec` (`execIn`). An empty list, name or new owner is
+`ErrInvalidRequest`; unknown role (42704), not a member (42501),
+dependents without CASCADE (2BP01) are the server's.
+
+Tests: offline `dependency_test.go` (every field and kind, NULL identity /
+no row / no edge, refusals sending nothing, Address of every handle),
+`dependency_internal_test.go` (the fold spliced into all three places of
+both queries), `search_test.go`, `TestScriptOwnedWrites`. Live
+`TestLiveDependencies`: a fixture with every kind of edge, each user
+object's `Dependencies`/`Dependents` checked edge for edge against
+`pg_depend`/`pg_shdepend` **folded independently in Go** (106 objects,
+~2300 edges), the parts and identities pinned, shared reads, both searches,
+REASSIGN/DROP OWNED read back; green on pg15–pg18. Sweep:
+`sweepDependencies`. 30 mutations: 29 caught, 1 equivalent (a "root is not
+the object" guard `parts` already ensures; removed).
 
 ### Version sweep (`live_versionsweep_test.go`)
 
